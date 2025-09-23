@@ -3,6 +3,7 @@ import time, struct
 from l2msg.core import protocol
 from l2msg.net.raw_socket import RawLink
 from l2msg.utils.ifaces import mac_to_str
+from l2msg.storage.peers import PeerTable
 
 # Payload HELLO/ACK: NAME_LEN(1) | NAME(bytes)
 def build_payload_name(name: str) -> bytes:
@@ -27,28 +28,31 @@ def send_ack(link: RawLink, dst_mac: bytes, node_name: str, seq: int = 1):
     frame = protocol.pack_frame(protocol.HELLO_ACK, seq, payload)
     link.send(dst_mac, frame)
 
-def discover(link: RawLink, node_name: str, window_s: float = 1.5) -> dict[str, str]:
-    peers: dict[str, str] = {}
+def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: float = 1.5) -> dict[str, str]:
     t0 = time.monotonic()
     broadcast_hello(link, node_name, seq=int(t0) & 0xffffffff)
+    
     while time.monotonic() - t0 < window_s:
         pkt = link.recv(timeout=0.2)
         if not pkt:
             continue
+        
         src, _, p = pkt
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
         except Exception:
             continue
+
         mac = mac_to_str(src)
         if mtype == protocol.HELLO:
             # Responder unicast
             send_ack(link, src, node_name, seq=seq)
         elif mtype == protocol.HELLO_ACK:
-            peers[mac] = parse_payload_name(payload)
-    return peers
+            name = parse_payload_name(payload)
+            peer_table.add_peer(mac, name)
+    return peer_table.get_peers()
 
-def listen_forever(link: RawLink, node_name: str):
+def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable):
     # Daemon simple: responde HELLO con ACK; muestra peers que nos saludan
     print(f"[listen] iface={link.iface} etype=0x{link.ether_type:04x} mac={mac_to_str(link.src_mac)}")
     while True:
@@ -68,3 +72,4 @@ def listen_forever(link: RawLink, node_name: str):
         elif mtype == protocol.HELLO_ACK:
             name = parse_payload_name(payload)
             print(f"[discover->] HELLO_ACK from {mac} name='{name}'")
+            peer_table.add_peer(mac, name)  # Añadir el peer a la tabla
