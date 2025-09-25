@@ -1,14 +1,25 @@
 services:
   node1:
-    build: ../..
-    command: ["python","-m","l2msg.cli"]
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
     cap_add: [ "NET_RAW", "NET_ADMIN" ]
     networks: [ "l2lab" ]
+    volumes:
+      - ../../src:/app/src:ro
+      - ../../configs:/app/configs:ro
+    command: ["sleep","infinity"]   # <— queda vivo
+
   node2:
-    build: ../..
-    command: ["python","-m","l2msg.cli"]
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
     cap_add: [ "NET_RAW", "NET_ADMIN" ]
     networks: [ "l2lab" ]
+    volumes:
+      - ../../src:/app/src:ro
+      - ../../configs:/app/configs:ro
+    command: ["sleep","infinity"]   # <— queda vivo
 
 networks:
   l2lab:

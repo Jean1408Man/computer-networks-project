@@ -1,0 +1,12 @@
+[app]
+# EtherType experimental reservado para pruebas locales (puedes cambiarlo)
+ether_type = "0x88B5"
+
+# "auto" elige la primera interfaz no-loopback (eth0, enp*, etc.)
+iface = "auto"
+
+# Nombre para anunciarte en HELLO/ACK
+node_name = "nodo-demo"
+
+# Tamaño seguro para payloads iniciales
+mtu_safe = 1400
