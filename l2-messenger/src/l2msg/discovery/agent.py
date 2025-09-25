@@ -31,13 +31,18 @@ def send_ack(link: RawLink, dst_mac: bytes, node_name: str, seq: int = 1):
 def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: float = 1.5) -> dict[str, str]:
     t0 = time.monotonic()
     broadcast_hello(link, node_name, seq=int(t0) & 0xffffffff)
-    
+
     while time.monotonic() - t0 < window_s:
         pkt = link.recv(timeout=0.2)
         if not pkt:
             continue
-        
+
         src, _, p = pkt
+
+        # ⬇️ Ignorar mis propias tramas (evita auto-registro)
+        if src == link.src_mac:
+            continue
+
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
         except Exception:
@@ -45,31 +50,44 @@ def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: flo
 
         mac = mac_to_str(src)
         if mtype == protocol.HELLO:
+            # ⬇️ NUEVO: registrar a quien “saluda”
+            name = parse_payload_name(payload)
+            peer_table.add_peer(mac, name)
             # Responder unicast
             send_ack(link, src, node_name, seq=seq)
+
         elif mtype == protocol.HELLO_ACK:
             name = parse_payload_name(payload)
             peer_table.add_peer(mac, name)
     return peer_table.get_peers()
 
 def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable):
-    # Daemon simple: responde HELLO con ACK; muestra peers que nos saludan
-    print(f"[listen] iface={link.iface} etype=0x{link.ether_type:04x} mac={mac_to_str(link.src_mac)}")
+    #print(f"[listen] iface={link.iface} etype=0x{link.ether_type:04x} mac={mac_to_str(link.src_mac)}")
     while True:
         pkt = link.recv(timeout=1.0)
         if not pkt:
             continue
+
         src, _, p = pkt
+
+        # ⬇️ Ignorar mis propias tramas
+        if src == link.src_mac:
+            continue
+
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
         except Exception:
             continue
+
         mac = mac_to_str(src)
         if mtype == protocol.HELLO:
             name = parse_payload_name(payload)
-            print(f"[discover<-] HELLO from {mac} name='{name}'")
+            #print(f"[discover<-] HELLO from {mac} name='{name}'")
+            # ⬇️ NUEVO: registrar al emisor del HELLO
+            peer_table.add_peer(mac, name)
             send_ack(link, src, node_name, seq)
+
         elif mtype == protocol.HELLO_ACK:
             name = parse_payload_name(payload)
-            print(f"[discover->] HELLO_ACK from {mac} name='{name}'")
-            peer_table.add_peer(mac, name)  # Añadir el peer a la tabla
+            #print(f"[discover->] HELLO_ACK from {mac} name='{name}'")
+            peer_table.add_peer(mac, name)

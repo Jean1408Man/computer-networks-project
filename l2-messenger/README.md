@@ -49,4 +49,16 @@ docker exec -it <node1_container_id> /bin/bash
 python3 /app/src/l2msg/cli/__main__.py listen --ttl 30
 ```
 
+## Lo mismo pero en Local
+```
+# 1) Averigua el binario REAL de python3
+readlink -f "$(command -v python3)"
+
+# Suponiendo que imprime /usr/bin/python3.12 (ajusta si te da otra ruta)
+sudo setcap cap_net_raw+ep /usr/bin/python3.12
+
+# 2) Verifica
+getcap /usr/bin/python3.12
+```
+
 
