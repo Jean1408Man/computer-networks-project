@@ -39,6 +39,11 @@ mtu_safe = 1400          # Tamaño seguro de la MTU
 docker compose -f docker/virtual-lab/compose.yml down
 docker compose -f docker/virtual-lab/compose.yml up -d --build
 ```
+
+### Ver los contenedores y buscar su nombre o su id
+```
+    docker ps
+```
 ### Entrar en los contenedores
 
 ```
@@ -46,7 +51,7 @@ docker exec -it <node1_container_id> /bin/bash
 ```
 ### Ejecutar comandos
 ```
-python3 /app/src/l2msg/cli/__main__.py listen --ttl 30
+python3 /app/src/l2msg/cli/__main__.py
 ```
 
 ## Lo mismo pero en Local
