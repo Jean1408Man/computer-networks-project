@@ -1,0 +1,2 @@
+/app/src/l2msg/cli/__main__.py
+mac: 9e:b7:eb:ea:d0:06

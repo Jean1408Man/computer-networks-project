@@ -66,4 +66,10 @@ sudo setcap cap_net_raw+ep /usr/bin/python3.12
 getcap /usr/bin/python3.12
 ```
 
+### Corremos esto
+```
+export PYTHONPATH="$PWD/src"
+python3 -m l2msg.cli.__main__
+```
 
+tail -f logs/l2msg.log
