@@ -8,9 +8,8 @@ from l2msg.discovery.agent import discover, listen_forever
 from l2msg.utils.config import load_config
 from l2msg.utils.ifaces import normalize_iface
 from l2msg.storage.peers import PeerTable
-from l2msg.transfer.transfer import send_file
-from l2msg.utils.logsetup import setup_logging, get_logger
 from l2msg.transfer.transfer import send_file, send_message
+from l2msg.utils.logsetup import setup_logging, get_logger
 from l2msg.storage.messages import list_all as inbox_list, clear as inbox_clear
 
 
@@ -27,11 +26,27 @@ class PeerManager:
         return self.peer_table.get_peers()
 
 
-# Hilo de escucha: respeta sending_event para no competir con send_file
-def listen_forever_thread(link, node_name, peer_manager, log, sending_event: threading.Event):
+# Hilo de escucha: respeta sending_event para no competir con emisores
+# y respeta flags de recepción exclusiva por tipo (mensajes vs archivos)
+def listen_forever_thread(
+    link,
+    node_name,
+    peer_manager,
+    log,
+    sending_event: threading.Event,
+    rx_msgs_enable: threading.Event,
+    rx_files_enable: threading.Event,
+):
     log.info("Hilo de escucha iniciado")
     try:
-        listen_forever(link, node_name, peer_manager.peer_table, pause_event=sending_event)
+        listen_forever(
+            link,
+            node_name,
+            peer_manager.peer_table,
+            pause_event=sending_event,
+            allow_msgs_event=rx_msgs_enable,     # <-- NUEVO
+            allow_files_event=rx_files_enable,   # <-- NUEVO
+        )
     except Exception as e:
         log.exception("Excepción en listen_forever: %s", e)
 
@@ -72,13 +87,20 @@ def main(stdscr):
     peer_manager = PeerManager(ttl=60)
     log.info("PeerManager TTL=%d", 60)
 
-    # Evento para pausar el listener durante transferencias
+    # Evento para pausar el listener durante operaciones que usan recv()
     sending_event = threading.Event()
 
-    # Iniciar el hilo de escucha (pausable)
+    # Flags distintivos para recepción (listener):
+    # - por defecto ambos habilitados
+    rx_msgs_enable = threading.Event()
+    rx_files_enable = threading.Event()
+    rx_msgs_enable.set()
+    rx_files_enable.set()
+
+    # Iniciar el hilo de escucha (pausable + con flags por tipo)
     listen_thread = threading.Thread(
         target=listen_forever_thread,
-        args=(link, node_name, peer_manager, log, sending_event),
+        args=(link, node_name, peer_manager, log, sending_event, rx_msgs_enable, rx_files_enable),
         daemon=True
     )
     listen_thread.start()
@@ -99,7 +121,22 @@ def main(stdscr):
 
         if key == ord('1'):  # Comando discover
             log.info("Comando: discover")
-            peers = peer_manager.discover_peers(link, node_name)
+
+            if sending_event.is_set():
+                stdscr.clear()
+                stdscr.addstr(6, 0, "Otra operación de transferencia está en curso. Intente nuevamente en unos segundos.")
+                log.warning("Discover cancelado: sending_event activo (socket en uso)")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+
+            # Pausar el listener para que discover tenga acceso exclusivo a recv()
+            sending_event.set()
+            try:
+                peers = peer_manager.discover_peers(link, node_name)
+            finally:
+                sending_event.clear()
+
             stdscr.clear()
             if not peers:
                 stdscr.addstr(6, 0, "No se encontraron peers en la ventana de tiempo.")
@@ -163,8 +200,11 @@ def main(stdscr):
                 continue
 
             # Pausar el listener para no competir por recv()
-            log.debug("Pausando listener para enviar...")
+            log.debug("Pausando listener para enviar archivo...")
             sending_event.set()
+            # Además, durante el envío de archivo: habilitar FILE y deshabilitar MSG en el listener
+            rx_files_enable.set()
+            rx_msgs_enable.clear()
             try:
                 log.info("Intentando enviar archivo '%s' a %s", path, mac_str)
                 ok = send_file(link, dst_mac, path)
@@ -173,6 +213,9 @@ def main(stdscr):
                 log.exception("Excepción durante send_file: %s", e)
                 ok = False
             finally:
+                # Restaurar flags
+                rx_msgs_enable.set()
+                rx_files_enable.set()
                 sending_event.clear()
                 log.debug("Listener reanudado")
 
@@ -184,41 +227,75 @@ def main(stdscr):
         elif key == ord('5'):  # Enviar mensaje
             log.info("Comando: sendmsg (solicitando datos)")
             stdscr.clear()
-            stdscr.addstr(6, 0, "Ingrese la MAC destino (ej. aa:bb:cc:dd:ee:ff): ")
-            curses.echo()
-            mac_str = stdscr.getstr(7, 0, 32).decode().strip()
-
-            stdscr.addstr(9, 0, "Ingrese el mensaje (una línea): ")
-            text = stdscr.getstr(10, 0, 4000).decode().strip()
-            curses.noecho()
 
             try:
-                dst_mac = bytes.fromhex(mac_str.replace(":", "").lower())
-            except ValueError:
-                log.error("MAC inválida: %s", mac_str)
-                stdscr.addstr(12, 0, "MAC inválida. Use formato aa:bb:cc:dd:ee:ff")
+                # --- Entrada de MAC destino ---
+                stdscr.addstr(6, 0, "Ingrese la MAC destino (ej. aa:bb:cc:dd:ee:ff): ")
+                curses.echo()
+                mac_str_raw = stdscr.getstr(7, 0, 32).decode(errors="replace").strip()
+                mac_norm = mac_str_raw.replace("-", ":").lower()
+                mac_hex = mac_norm.replace(":", "")
+
+                # Validación básica de MAC (12 hex)
+                if len(mac_hex) != 12 or any(c not in "0123456789abcdef" for c in mac_hex):
+                    log.error("MAC inválida: %s", mac_str_raw)
+                    curses.noecho()
+                    stdscr.addstr(9, 0, "MAC inválida. Use formato aa:bb:cc:dd:ee:ff")
+                    stdscr.refresh()
+                    stdscr.getch()
+                    continue
+
+                dst_mac = bytes.fromhex(mac_hex)
+                mac_pretty = ":".join(mac_hex[i:i+2] for i in range(0, 12, 2))
+
+                # --- Entrada de mensaje ---
+                stdscr.addstr(9, 0, "Ingrese el mensaje (una línea): ")
+                text = stdscr.getstr(10, 0, 4000).decode(errors="replace").strip()
+                curses.noecho()
+
+                if not text:
+                    log.warning("Mensaje vacío; se cancela el envío")
+                    stdscr.addstr(12, 0, "El mensaje no puede estar vacío.")
+                    stdscr.refresh()
+                    stdscr.getch()
+                    continue
+
+                # --- Pausar listener y enviar ---
+                log.debug("Pausando listener para enviar MSG...")
+                sending_event.set()
+                # Durante el envío de mensaje: habilitar MSG y deshabilitar FILE en el listener
+                rx_msgs_enable.set()
+                rx_files_enable.clear()
+                try:
+                    log.info("Intentando enviar mensaje a %s", mac_pretty)
+                    ok = send_message(link, dst_mac, text)
+                    log.info("Resultado envío MSG a %s: %s", mac_pretty, "OK" if ok else "FAIL")
+                except Exception as e:
+                    log.exception("Excepción durante send_message: %s", e)
+                    ok = False
+                finally:
+                    # Restaurar flags
+                    rx_msgs_enable.set()
+                    rx_files_enable.set()
+                    sending_event.clear()
+                    log.debug("Listener reanudado")
+
+                # --- Feedback al usuario ---
+                msg = "Mensaje enviado correctamente." if ok else "Error al enviar mensaje."
+                stdscr.addstr(12, 0, msg)
                 stdscr.refresh()
                 stdscr.getch()
-                continue
 
-            # Pausar listener para no competir por recv()
-            log.debug("Pausando listener para enviar MSG...")
-            sending_event.set()
-            try:
-                log.info("Intentando enviar mensaje a %s", mac_str)
-                ok = send_message(link, dst_mac, text)
-                log.info("Resultado envío MSG: %s", "OK" if ok else "FAIL")
             except Exception as e:
-                log.exception("Excepción durante send_message: %s", e)
-                ok = False
-            finally:
-                sending_event.clear()
-                log.debug("Listener reanudado")
-
-            msg = "Mensaje enviado correctamente." if ok else "Error al enviar mensaje."
-            stdscr.addstr(12, 0, msg)
-            stdscr.refresh()
-            stdscr.getch()
+                # Aseguramos restaurar el echo ante cualquier excepción inesperada
+                try:
+                    curses.noecho()
+                except Exception:
+                    pass
+                log.exception("Error en flujo sendmsg: %s", e)
+                stdscr.addstr(12, 0, "Ocurrió un error. Revise los logs.")
+                stdscr.refresh()
+                stdscr.getch()
 
         elif key == ord('6'):  # Ver mensajes recibidos
             log.info("Comando: inbox (listar mensajes)")
@@ -267,8 +344,6 @@ def main(stdscr):
                     stdscr.refresh()
                     stdscr.getch()
                     break
-
-
 
         else:
             log.debug("Tecla no reconocida: %r", key)
