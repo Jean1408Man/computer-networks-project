@@ -11,6 +11,8 @@ from l2msg.storage.peers import PeerTable
 from l2msg.transfer.transfer import send_file
 from l2msg.utils.logsetup import setup_logging, get_logger
 from l2msg.transfer.transfer import send_file, send_message
+from l2msg.storage.messages import list_all as inbox_list, clear as inbox_clear
+
 
 # Clase para gestionar la tabla de peers
 class PeerManager:
@@ -89,7 +91,8 @@ def main(stdscr):
         stdscr.addstr(3, 0, "3. Salir (exit)")
         stdscr.addstr(4, 0, "4. Enviar archivo (sendfile)")
         stdscr.addstr(5, 0, "5. Enviar mensaje (sendmsg)")
-        stdscr.addstr(6, 0, "Seleccione un comando (1-5):")
+        stdscr.addstr(6, 0, "6. Ver mensajes recibidos (inbox)")
+        stdscr.addstr(7, 0, "Seleccione un comando (1-6):")
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -216,6 +219,55 @@ def main(stdscr):
             stdscr.addstr(12, 0, msg)
             stdscr.refresh()
             stdscr.getch()
+
+        elif key == ord('6'):  # Ver mensajes recibidos
+            log.info("Comando: inbox (listar mensajes)")
+            stdscr.clear()
+            stdscr.addstr(0, 0, "📨 Mensajes recibidos (más recientes al final):")
+            msgs = inbox_list()
+            if not msgs:
+                stdscr.addstr(2, 0, "(no hay mensajes aún)")
+                stdscr.addstr(4, 0, "Presione cualquier tecla para volver…")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+
+            # Pintar con paginado simple
+            row = 2
+            h, w = stdscr.getmaxyx()
+            per_page = max(1, h - 6)
+            i = 0
+            while True:
+                stdscr.clear()
+                stdscr.addstr(0, 0, "📨 Mensajes recibidos (más recientes al final):")
+                end = min(i + per_page, len(msgs))
+                for idx in range(i, end):
+                    m = msgs[idx]
+                    ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(m["ts"]))
+                    line = f"{idx+1:>3} | {ts} | {m['mac']} | {m['text']}"
+                    stdscr.addnstr(row + (idx - i), 0, line, w - 1)
+                stdscr.addstr(h-3, 0, "[↑/↓] navega  [C] limpiar inbox  [Q] volver")
+                stdscr.refresh()
+
+                ch = stdscr.getch()
+                if ch in (ord('q'), ord('Q')):
+                    break
+                elif ch in (curses.KEY_DOWN, ord('j')):
+                    if end < len(msgs):
+                        i = min(len(msgs)-1, i + 1)
+                elif ch in (curses.KEY_UP, ord('k')):
+                    if i > 0:
+                        i = max(0, i - 1)
+                elif ch in (ord('c'), ord('C')):
+                    log.warning("Comando: inbox -> limpiar")
+                    inbox_clear()
+                    msgs = []
+                    stdscr.addstr(2, 0, "(inbox vaciado)")
+                    stdscr.addstr(4, 0, "Presione cualquier tecla para volver…")
+                    stdscr.refresh()
+                    stdscr.getch()
+                    break
+
 
 
         else:

@@ -4,6 +4,8 @@ from l2msg.core import protocol
 from l2msg.net.raw_socket import RawLink
 from l2msg.utils.ifaces import mac_to_str
 from l2msg.storage.peers import PeerTable
+from l2msg.storage.messages import add as inbox_add  # <-- nuevo
+    
 
 log = logging.getLogger("agent.listen")
 _incoming = {}
@@ -189,6 +191,7 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                 log.warning("RX FILE_CANCEL de %s -> archivo %s cancelado (%d bytes)",
                             mac, st["name"], st["bytes"])
                 
+
         elif mtype == protocol.MSG_OFFER:
             msize, crc_expected = protocol.parse_msg_offer(payload)
             log.info("RX MSG_OFFER de %s: %d bytes (crc=0x%08x)", mac, msize, crc_expected)
@@ -199,8 +202,11 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                 "crc": 0,
                 "crc_expected": crc_expected,
             }
+            log.debug("Estado inicial mensaje [%s]: size=%d expected=%d crc=0x%08x",
+                    mac, _msg_incoming[mac]["size"], _msg_incoming[mac]["expected"],
+                    _msg_incoming[mac]["crc"])
             link.send(src, protocol.pack_frame(protocol.MSG_ACCEPT, seq, b""))
-            log.debug("Enviado MSG_ACCEPT a %s", mac)
+            log.debug("Enviado MSG_ACCEPT a %s (seq=%d)", mac, seq)
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
 
         elif mtype == protocol.MSG_DATA:
@@ -208,23 +214,40 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
             if not st:
                 log.warning("RX MSG_DATA inesperado de %s seq=%d -> MSG_CANCEL", mac, seq)
                 link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
+                log.debug("Enviado MSG_CANCEL a %s (no había estado de mensaje)", mac)
                 continue
+
             exp = st["expected"]
             if seq < exp:
+                log.debug("RX MSG_DATA duplicado de %s (seq=%d < expected=%d) -> ACK eco", mac, seq, exp)
                 link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+                log.debug("Enviado MSG_ACK a %s (seq=%d, duplicado)", mac, seq)
                 continue
             elif seq > exp:
+                log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> ACK eco", mac, seq, exp)
                 link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+                log.debug("Enviado MSG_ACK a %s (seq=%d, fuera de orden)", mac, seq)
                 continue
 
             remaining = st["size"] - len(st["buf"])
+            if remaining < 0:
+                log.warning("RX MSG_DATA de %s con remaining negativo (remaining=%d) — ignorando exceso", mac, remaining)
+
             take = payload if len(payload) <= remaining else payload[:max(0, remaining)]
+            if len(payload) > remaining and remaining > 0:
+                log.warning("Truncando payload de %s en seq=%d (payload=%d, remaining=%d)",
+                            mac, seq, len(payload), remaining)
+
             if take:
                 st["buf"].extend(take)
                 st["crc"] = zlib.crc32(take, st["crc"])
-            st["expected"] += 1
+                log.debug("Acumulado %d/%d bytes de %s (seq=%d, crc=0x%08x)",
+                        len(st["buf"]), st["size"], mac, seq, st["crc"] & 0xffffffff)
 
+            st["expected"] += 1
             link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+            log.debug("Enviado MSG_ACK a %s (seq=%d)", mac, seq)
+
             if seq == 0:
                 log.info("RX primer MSG_DATA de %s (%d/%d bytes)", mac, len(st["buf"]), st["size"])
             else:
@@ -236,20 +259,34 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                 rx_crc = None
                 if len(payload) == 4:
                     (rx_crc,) = struct.unpack("!I", payload)
+                    log.debug("RX MSG_DONE de %s con crc en payload=0x%08x", mac, rx_crc)
                 expected_crc = rx_crc if rx_crc is not None else st["crc_expected"]
-                ok = (len(st["buf"]) == st["size"]) and ((st["crc"] & 0xffffffff) == (expected_crc & 0xffffffff))
+
+                len_ok = (len(st["buf"]) == st["size"])
+                crc_ok = ((st["crc"] & 0xffffffff) == (expected_crc & 0xffffffff))
+                ok = len_ok and crc_ok
+
                 text = st["buf"].decode("utf-8", errors="replace")
+
                 # Persistimos en un archivo simple de inbox (opcional)
                 os.makedirs(INBOX_DIR, exist_ok=True)
                 msg_path = os.path.join(INBOX_DIR, "messages.log")
                 with open(msg_path, "a", encoding="utf-8") as fp:
                     fp.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {mac}: {text}\n")
-                log.info("RX MSG_DONE de %s -> mensaje (%d/%d bytes, crc=0x%08x esperado=0x%08x) %s",
+
+                log.info("RX MSG_DONE de %s -> mensaje (%d/%d bytes, crc_calc=0x%08x esperado=0x%08x) %s "
+                        "[len_ok=%s crc_ok=%s]",
                         mac, len(st["buf"]), st["size"],
                         st["crc"] & 0xffffffff, expected_crc & 0xffffffff,
-                        "OK" if ok else "MISMATCH")
+                        "OK" if ok else "MISMATCH",
+                        "OK" if len_ok else "FAIL", "OK" if crc_ok else "FAIL")
+            else:
+                log.warning("RX MSG_DONE de %s sin estado previo; ignorado", mac)
 
         elif mtype == protocol.MSG_CANCEL:
             st = _msg_incoming.pop(mac, None)
             if st:
-                log.warning("RX MSG_CANCEL de %s -> mensaje descartado (%d bytes)", mac, len(st["buf"]))
+                log.warning("RX MSG_CANCEL de %s -> mensaje descartado (%d bytes, expected=%d)",
+                            mac, len(st["buf"]), st["expected"])
+            else:
+                log.warning("RX MSG_CANCEL de %s sin estado previo; ignorado", mac)
