@@ -1,11 +1,15 @@
 import curses
 import threading
 import time
+import os
 from l2msg.net.raw_socket import RawLink
 from l2msg.discovery.agent import discover, listen_forever
 from l2msg.utils.config import load_config
 from l2msg.utils.ifaces import normalize_iface
 from l2msg.storage.peers import PeerTable
+from l2msg.transfer.transfer import send_file
+import logging
+from l2msg.utils.logsetup import setup_logging, get_logger
 
 
 # Clase para gestionar la tabla de peers
@@ -21,76 +25,163 @@ class PeerManager:
         return self.peer_table.get_peers()
 
 
-# Función para ejecutar el comando listen
-def listen_forever_thread(link, node_name, peer_manager):
-    while True:
-        listen_forever(link, node_name, peer_manager.peer_table)
-        time.sleep(1)  # Añadimos un pequeño retraso para no saturar el hilo
+# Hilo de escucha: respeta sending_event para no competir con send_file
+def listen_forever_thread(link, node_name, peer_manager, log, sending_event: threading.Event):
+    log.info("Hilo de escucha iniciado")
+    try:
+        listen_forever(link, node_name, peer_manager.peer_table, pause_event=sending_event)
+    except Exception as e:
+        log.exception("Excepción en listen_forever: %s", e)
 
 
 # Función principal que maneja la UI y los comandos
 def main(stdscr):
     stdscr.clear()  # Limpiar la pantalla
+    curses.curs_set(0)  # ocultar cursor en el menú
 
     # Configuración inicial
     cfg = load_config("configs/app.toml")
+
+    # --- Inicialización de logging (a archivo, según tu logsetup) ---
+    setup_logging(cfg)
+    log = get_logger("ui")
+    log.info("UI iniciada")
+
     iface = normalize_iface(cfg["iface"])
     etype = int(cfg["ether_type"])
     node_name = cfg["node_name"]
+    log.info("Config: iface=%s ether_type=0x%04x node_name=%s", iface, etype, node_name)
 
     # Inicialización del RawLink y PeerManager
-    link = RawLink(iface=iface, ether_type=etype)
-    peer_manager = PeerManager(ttl=60)
+    try:
+        link = RawLink(iface=iface, ether_type=etype)
+        # Algunos RawLink no exponen src_mac_str; lo derivamos si no está
+        src_mac_str = getattr(link, "src_mac_str", None)
+        if not src_mac_str and hasattr(link, "src_mac"):
+            src_mac_str = ":".join(f"{b:02x}" for b in link.src_mac)
+        log.info("RawLink creado: src_mac=%s", src_mac_str or "desconocida")
+    except Exception as e:
+        log.exception("No se pudo crear RawLink: %s", e)
+        stdscr.addstr(0, 0, "Error inicializando la interfaz. Revisa los logs.")
+        stdscr.refresh()
+        stdscr.getch()
+        return
 
-    # Iniciar el hilo de escucha
-    listen_thread = threading.Thread(target=listen_forever_thread, args=(link, node_name, peer_manager), daemon=True)
+    peer_manager = PeerManager(ttl=60)
+    log.info("PeerManager TTL=%d", 60)
+
+    # Evento para pausar el listener durante transferencias
+    sending_event = threading.Event()
+
+    # Iniciar el hilo de escucha (pausable)
+    listen_thread = threading.Thread(
+        target=listen_forever_thread,
+        args=(link, node_name, peer_manager, log, sending_event),
+        daemon=True
+    )
     listen_thread.start()
 
     while True:
+        stdscr.clear()
         stdscr.addstr(0, 0, "Comandos:")
         stdscr.addstr(1, 0, "1. Descubrir Peers (discover)")
         stdscr.addstr(2, 0, "2. Mostrar Peers (peers)")
         stdscr.addstr(3, 0, "3. Salir (exit)")
-        stdscr.addstr(5, 0, "Seleccione un comando (1-3):")
+        stdscr.addstr(4, 0, "4. Enviar archivo (sendfile)")
+        stdscr.addstr(6, 0, "Seleccione un comando (1-4):")
         stdscr.refresh()
 
         key = stdscr.getch()
 
         if key == ord('1'):  # Comando discover
+            log.info("Comando: discover")
             peers = peer_manager.discover_peers(link, node_name)
             stdscr.clear()
             if not peers:
                 stdscr.addstr(6, 0, "No se encontraron peers en la ventana de tiempo.")
+                log.info("Discover: 0 peers")
             else:
                 stdscr.addstr(6, 0, "Peers encontrados:")
                 row = 7
                 for mac, name in peers.items():
                     stdscr.addstr(row, 0, f"{mac} -> {name}")
                     row += 1
+                log.info("Discover: %d peers", len(peers))
             stdscr.refresh()
-            stdscr.getch()  # Espera una tecla para continuar
+            stdscr.getch()
 
         elif key == ord('2'):  # Comando peers
+            log.info("Comando: peers")
             peers = peer_manager.show_peers()
             stdscr.clear()
             if not peers:
                 stdscr.addstr(6, 0, "No hay peers disponibles.")
+                log.info("Peers activos: 0")
             else:
                 stdscr.addstr(6, 0, "Peers activos:")
                 row = 7
                 for mac, data in peers.items():
                     stdscr.addstr(row, 0, f"{mac} -> {data['name']}")
                     row += 1
+                log.info("Peers activos: %d", len(peers))
             stdscr.refresh()
-            stdscr.getch()  # Espera una tecla para continuar
+            stdscr.getch()
 
         elif key == ord('3'):  # Salir
+            log.info("Comando: exit")
             break
 
+        elif key == ord('4'):  # Enviar archivo
+            log.info("Comando: sendfile (solicitando datos)")
+            stdscr.clear()
+            stdscr.addstr(6, 0, "Ingrese la MAC destino (ej. aa:bb:cc:dd:ee:ff): ")
+            curses.echo()
+            mac_str = stdscr.getstr(7, 0, 32).decode().strip()
+
+            stdscr.addstr(9, 0, "Ingrese la ruta del archivo a enviar: ")
+            path = stdscr.getstr(10, 0, 256).decode().strip()
+            curses.noecho()
+
+            if not os.path.isfile(path):
+                log.warning("Ruta inválida de archivo: %s", path)
+                stdscr.addstr(12, 0, "Archivo no encontrado.")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+
+            try:
+                dst_mac = bytes.fromhex(mac_str.replace(":", "").lower())
+            except ValueError:
+                log.error("MAC inválida: %s", mac_str)
+                stdscr.addstr(12, 0, "MAC inválida. Use formato aa:bb:cc:dd:ee:ff")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+
+            # Pausar el listener para no competir por recv()
+            log.debug("Pausando listener para enviar...")
+            sending_event.set()
+            try:
+                log.info("Intentando enviar archivo '%s' a %s", path, mac_str)
+                ok = send_file(link, dst_mac, path)
+                log.info("Resultado envío: %s", "OK" if ok else "FAIL")
+            except Exception as e:
+                log.exception("Excepción durante send_file: %s", e)
+                ok = False
+            finally:
+                sending_event.clear()
+                log.debug("Listener reanudado")
+
+            msg = "Archivo enviado correctamente." if ok else "Error al enviar archivo."
+            stdscr.addstr(12, 0, msg)
+            stdscr.refresh()
+            stdscr.getch()
+
         else:
+            log.debug("Tecla no reconocida: %r", key)
             stdscr.addstr(4, 0, "Comando no reconocido. Intente nuevamente.")
             stdscr.refresh()
-            time.sleep(1)  # Pausa antes de volver a mostrar el menú
+            time.sleep(1)
 
 
 if __name__ == "__main__":

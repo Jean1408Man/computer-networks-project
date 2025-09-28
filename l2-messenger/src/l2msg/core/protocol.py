@@ -8,7 +8,12 @@ VERSION = 1
 # Tipos de mensaje mínimos para descubrimiento
 HELLO     = 0x01
 HELLO_ACK = 0x02
-
+FILE_OFFER  = 0x10
+FILE_ACCEPT = 0x11
+FILE_DATA   = 0x12
+FILE_ACK    = 0x13
+FILE_DONE   = 0x14
+FILE_CANCEL = 0x15
 # Cabecera de nuestro protocolo (sobre el payload de Ethernet)
 # MAGIC(4) | VER(1) | TYPE(1) | SEQ(4) | LEN(2) | FLAGS(1) | CRC32(4)
 _HDR = struct.Struct("!4s B B I H B I")
@@ -31,3 +36,22 @@ def unpack_frame(data: bytes):
     if (zlib.crc32(payload) & 0xffffffff) != crc:
         raise ValueError("CRC inválido")
     return mtype, seq, flags, payload
+
+def build_file_offer(name: str, size: int, hash32: int = 0) -> bytes:
+    """
+    Payload FILE_OFFER:
+      NAME_LEN(1) | NAME(bytes) | SIZE(8, uint64) | CRC32(4, uint32)
+    """
+    b = name.encode("utf-8")[:255]
+    return struct.pack("!B", len(b)) + b + struct.pack("!QI", size, hash32 & 0xffffffff)
+
+def parse_file_offer(p: bytes):
+    """
+    Devuelve: (name, size:uint64, crc32:uint32)
+    """
+    if not p:
+        return "", 0, 0
+    n = p[0]
+    name = p[1:1+n].decode("utf-8", "replace")
+    size, h = struct.unpack_from("!QI", p, 1+n)
+    return name, size, h

@@ -10,3 +10,13 @@ node_name = "nodo-demo"
 
 # Tamaño seguro para payloads iniciales
 mtu_safe = 1400
+
+[logging]
+level = "INFO"
+file  = "logs/l2msg.log"
+max_bytes = 5242880
+backup_count = 3
+console = false
+
+[files]
+inbox_dir = "/tmp/l2files"  # si prefieres config en vez de env L2MSG_INBOX
