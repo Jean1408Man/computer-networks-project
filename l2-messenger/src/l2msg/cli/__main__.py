@@ -2,15 +2,15 @@ import curses
 import threading
 import time
 import os
+import logging
 from l2msg.net.raw_socket import RawLink
 from l2msg.discovery.agent import discover, listen_forever
 from l2msg.utils.config import load_config
 from l2msg.utils.ifaces import normalize_iface
 from l2msg.storage.peers import PeerTable
 from l2msg.transfer.transfer import send_file
-import logging
 from l2msg.utils.logsetup import setup_logging, get_logger
-
+from l2msg.transfer.transfer import send_file, send_message
 
 # Clase para gestionar la tabla de peers
 class PeerManager:
@@ -88,7 +88,8 @@ def main(stdscr):
         stdscr.addstr(2, 0, "2. Mostrar Peers (peers)")
         stdscr.addstr(3, 0, "3. Salir (exit)")
         stdscr.addstr(4, 0, "4. Enviar archivo (sendfile)")
-        stdscr.addstr(6, 0, "Seleccione un comando (1-4):")
+        stdscr.addstr(5, 0, "5. Enviar mensaje (sendmsg)")
+        stdscr.addstr(6, 0, "Seleccione un comando (1-5):")
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -176,6 +177,46 @@ def main(stdscr):
             stdscr.addstr(12, 0, msg)
             stdscr.refresh()
             stdscr.getch()
+
+        elif key == ord('5'):  # Enviar mensaje
+            log.info("Comando: sendmsg (solicitando datos)")
+            stdscr.clear()
+            stdscr.addstr(6, 0, "Ingrese la MAC destino (ej. aa:bb:cc:dd:ee:ff): ")
+            curses.echo()
+            mac_str = stdscr.getstr(7, 0, 32).decode().strip()
+
+            stdscr.addstr(9, 0, "Ingrese el mensaje (una línea): ")
+            text = stdscr.getstr(10, 0, 4000).decode().strip()
+            curses.noecho()
+
+            try:
+                dst_mac = bytes.fromhex(mac_str.replace(":", "").lower())
+            except ValueError:
+                log.error("MAC inválida: %s", mac_str)
+                stdscr.addstr(12, 0, "MAC inválida. Use formato aa:bb:cc:dd:ee:ff")
+                stdscr.refresh()
+                stdscr.getch()
+                continue
+
+            # Pausar listener para no competir por recv()
+            log.debug("Pausando listener para enviar MSG...")
+            sending_event.set()
+            try:
+                log.info("Intentando enviar mensaje a %s", mac_str)
+                ok = send_message(link, dst_mac, text)
+                log.info("Resultado envío MSG: %s", "OK" if ok else "FAIL")
+            except Exception as e:
+                log.exception("Excepción durante send_message: %s", e)
+                ok = False
+            finally:
+                sending_event.clear()
+                log.debug("Listener reanudado")
+
+            msg = "Mensaje enviado correctamente." if ok else "Error al enviar mensaje."
+            stdscr.addstr(12, 0, msg)
+            stdscr.refresh()
+            stdscr.getch()
+
 
         else:
             log.debug("Tecla no reconocida: %r", key)
