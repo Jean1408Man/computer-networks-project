@@ -14,6 +14,12 @@ FILE_DATA   = 0x12
 FILE_ACK    = 0x13
 FILE_DONE   = 0x14
 FILE_CANCEL = 0x15
+MSG_OFFER  = 0x20
+MSG_ACCEPT = 0x21
+MSG_DATA   = 0x22
+MSG_ACK    = 0x23
+MSG_DONE   = 0x24
+MSG_CANCEL = 0x25
 # Cabecera de nuestro protocolo (sobre el payload de Ethernet)
 # MAGIC(4) | VER(1) | TYPE(1) | SEQ(4) | LEN(2) | FLAGS(1) | CRC32(4)
 _HDR = struct.Struct("!4s B B I H B I")
@@ -55,3 +61,19 @@ def parse_file_offer(p: bytes):
     name = p[1:1+n].decode("utf-8", "replace")
     size, h = struct.unpack_from("!QI", p, 1+n)
     return name, size, h
+
+def build_msg_offer(size: int, hash32: int = 0) -> bytes:
+    """
+    Payload MSG_OFFER:
+      SIZE(8, uint64) | CRC32(4, uint32)
+    """
+    return struct.pack("!QI", size, hash32 & 0xffffffff)
+
+def parse_msg_offer(p: bytes):
+    """
+    Devuelve: (size:uint64, crc32:uint32)
+    """
+    if len(p) < 12:
+        return 0, 0
+    size, h = struct.unpack_from("!QI", p, 0)
+    return size, h

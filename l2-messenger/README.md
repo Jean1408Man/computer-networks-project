@@ -47,7 +47,7 @@ docker compose -f docker/virtual-lab/compose.yml up -d --build
 ### Entrar en los contenedores
 
 ```
-docker exec -it <node1_container_id> /bin/bash
+docker exec -it virtual-lab-node1-1 /bin/bash
 ```
 ### Ejecutar comandos
 ```

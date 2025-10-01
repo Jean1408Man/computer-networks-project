@@ -4,9 +4,12 @@ from l2msg.core import protocol
 from l2msg.net.raw_socket import RawLink
 from l2msg.utils.ifaces import mac_to_str
 from l2msg.storage.peers import PeerTable
+from l2msg.storage.messages import add as inbox_add  # <-- nuevo
+    
 
 log = logging.getLogger("agent.listen")
 _incoming = {}
+_msg_incoming = {}
 INBOX_DIR = os.getenv("L2MSG_INBOX", "/tmp/l2files")
 
 # Payload HELLO/ACK: NAME_LEN(1) | NAME(bytes)
@@ -67,17 +70,27 @@ def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: flo
 
     return peer_table.get_peers()
 
-def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_event: 'threading.Event' = None):
+def listen_forever(
+    link: RawLink,
+    node_name: str,
+    peer_table: PeerTable,
+    pause_event: 'threading.Event' = None,
+    allow_msgs_event: 'threading.Event' = None,
+    allow_files_event: 'threading.Event' = None,
+):
     """
-    Listener principal. Si pause_event está activo, NO llama a recv() para no competir
-    con el emisor durante una transferencia.
+    Listener principal.
+    - pause_event activo => NO llama a recv() (cede el socket al emisor local).
+    - allow_msgs_event limpio => ignora/cancela MSG_*.
+    - allow_files_event limpio => ignora/cancela FILE_*.
+    Durante una recepción entrante, deshabilita temporalmente el otro tipo.
     """
     log.info("Escuchando en iface=%s etype=0x%04x mac=%s",
              link.iface, link.ether_type, mac_to_str(link.src_mac))
     os.makedirs(INBOX_DIR, exist_ok=True)
 
     while True:
-        # Pausa cooperativa: liberar el socket para el emisor (send_file)
+        # Ceder el socket si alguien más lo está usando (envíos, discover, etc.)
         if pause_event is not None and pause_event.is_set():
             time.sleep(0.02)
             continue
@@ -98,6 +111,7 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
 
         mac = mac_to_str(src)
 
+        # ------------------ CONTROL DE DISCOVERY ------------------
         if mtype == protocol.HELLO:
             name = parse_payload_name(payload)
             log.info("RX HELLO de %s name='%s'", mac, name)
@@ -109,7 +123,14 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
             log.info("RX HELLO_ACK de %s name='%s'", mac, name)
             peer_table.add_peer(mac, name)
 
+        # ------------------ CONTROL DE ARCHIVOS -------------------
         elif mtype == protocol.FILE_OFFER:
+            # Si archivos están deshabilitados, cancela inmediatamente
+            if (allow_files_event is not None) and (not allow_files_event.is_set()):
+                log.info("FILE_OFFER de %s recibido pero FILE RX está deshabilitado -> FILE_CANCEL", mac)
+                link.send(src, protocol.pack_frame(protocol.FILE_CANCEL, seq, b""))
+                continue
+
             fname, fsize, crc_expected = protocol.parse_file_offer(payload)
             dst_path = f"{INBOX_DIR}/{fname}"
             log.info("RX FILE_OFFER de %s: %s (%d bytes, crc=0x%08x)", mac, fname, fsize, crc_expected)
@@ -121,8 +142,16 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                 "expected": 0,           # próximo seq esperado
                 "crc": 0,                # crc32 acumulado
                 "crc_expected": crc_expected,
+                "_owns_files_lock": False,  # deshabilitamos MSG mientras recibimos FILE
             }
             _incoming[mac] = st
+
+            # Deshabilitar temporalmente MSG_* mientras dura el archivo
+            if (allow_msgs_event is not None) and allow_msgs_event.is_set():
+                allow_msgs_event.clear()
+                st["_owns_files_lock"] = True
+                log.debug("listen: MSG RX deshabilitado temporalmente (recibiendo FILE de %s)", mac)
+
             link.send(src, protocol.pack_frame(protocol.FILE_ACCEPT, seq, b""))
             log.debug("Enviado FILE_ACCEPT a %s", mac)
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
@@ -130,23 +159,20 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
         elif mtype == protocol.FILE_DATA:
             st = _incoming.get(mac)
             if not st:
-                log.warning("RX FILE_DATA inesperado de %s seq=%d -> CANCEL", mac, seq)
+                log.warning("RX FILE_DATA inesperado de %s seq=%d -> FILE_CANCEL", mac, seq)
                 link.send(src, protocol.pack_frame(protocol.FILE_CANCEL, seq, b""))
                 continue
 
             exp = st["expected"]
             if seq < exp:
-                # Duplicado (probable reintento por ACK perdido)
                 log.debug("Duplicado de %s seq=%d (expected=%d) -> re-ACK sin escribir", mac, seq, exp)
                 link.send(src, protocol.pack_frame(protocol.FILE_ACK, seq, b""))
                 continue
             elif seq > exp:
-                # Fuera de orden en stop-and-wait (no debería ocurrir)
                 log.warning("Fuera de orden de %s seq=%d (expected=%d) -> ignorando y re-ACK", mac, seq, exp)
                 link.send(src, protocol.pack_frame(protocol.FILE_ACK, seq, b""))
                 continue
 
-            # seq == expected -> escribir (respetando tamaño anunciado)
             remaining = st["size"] - st["bytes"]
             write_bytes = payload if len(payload) <= remaining else payload[:max(0, remaining)]
             if write_bytes:
@@ -160,7 +186,6 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
             else:
                 log.debug("RX FILE_DATA de %s seq=%d (%d/%d bytes)", mac, seq, st["bytes"], st["size"])
 
-            # ACK del mismo seq
             link.send(src, protocol.pack_frame(protocol.FILE_ACK, seq, b""))
             log.debug("ACK seq=%d enviado a %s", seq, mac)
 
@@ -171,7 +196,6 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                 rx_crc = None
                 if len(payload) == 4:
                     (rx_crc,) = struct.unpack("!I", payload)
-                # valida bytes y CRC (si vino en DONE o usa el del OFFER)
                 expected_crc = rx_crc if rx_crc is not None else st["crc_expected"]
                 ok = (st["bytes"] == st["size"]) and ((st["crc"] & 0xffffffff) == (expected_crc & 0xffffffff))
                 log.info(
@@ -181,9 +205,146 @@ def listen_forever(link: RawLink, node_name: str, peer_table: PeerTable, pause_e
                     "OK" if ok else "MISMATCH"
                 )
 
+                # Restaurar MSG_* si lo deshabilitamos nosotros
+                if st.get("_owns_files_lock") and (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
+                    allow_msgs_event.set()
+                    log.debug("listen: MSG RX restaurado tras FILE_DONE de %s", mac)
+
         elif mtype == protocol.FILE_CANCEL:
             st = _incoming.pop(mac, None)
             if st:
                 st["fp"].close()
                 log.warning("RX FILE_CANCEL de %s -> archivo %s cancelado (%d bytes)",
                             mac, st["name"], st["bytes"])
+                if st.get("_owns_files_lock") and (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
+                    allow_msgs_event.set()
+                    log.debug("listen: MSG RX restaurado tras FILE_CANCEL de %s", mac)
+
+        # ------------------ CONTROL DE MENSAJES -------------------
+        elif mtype == protocol.MSG_OFFER:
+            # Si mensajes están deshabilitados, cancela inmediatamente
+            if (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
+                log.info("MSG_OFFER de %s recibido pero MSG RX está deshabilitado -> MSG_CANCEL", mac)
+                link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
+                continue
+
+            msize, crc_expected = protocol.parse_msg_offer(payload)
+            log.info("RX MSG_OFFER de %s: %d bytes (crc=0x%08x)", mac, msize, crc_expected)
+            _msg_incoming[mac] = {
+                "buf": bytearray(),
+                "size": msize,
+                "expected": 0,
+                "crc": 0,
+                "crc_expected": crc_expected,
+                "_owns_msgs_lock": False,   # deshabilitamos FILE mientras recibimos MSG
+            }
+            log.debug("Estado inicial mensaje [%s]: size=%d expected=%d crc=0x%08x",
+                      mac, _msg_incoming[mac]["size"], _msg_incoming[mac]["expected"],
+                      _msg_incoming[mac]["crc"])
+
+            # Deshabilitar temporalmente FILE_* mientras dura el mensaje
+            if (allow_files_event is not None) and allow_files_event.is_set():
+                allow_files_event.clear()
+                _msg_incoming[mac]["_owns_msgs_lock"] = True
+                log.debug("listen: FILE RX deshabilitado temporalmente (recibiendo MSG de %s)", mac)
+
+            link.send(src, protocol.pack_frame(protocol.MSG_ACCEPT, seq, b""))
+            log.debug("Enviado MSG_ACCEPT a %s (seq=%d)", mac, seq)
+            peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
+
+        elif mtype == protocol.MSG_DATA:
+            st = _msg_incoming.get(mac)
+            if not st:
+                log.warning("RX MSG_DATA inesperado de %s seq=%d -> MSG_CANCEL", mac, seq)
+                link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
+                log.debug("Enviado MSG_CANCEL a %s (no había estado de mensaje)", mac)
+                continue
+
+            exp = st["expected"]
+            if seq < exp:
+                log.debug("RX MSG_DATA duplicado de %s (seq=%d < expected=%d) -> ACK eco", mac, seq, exp)
+                link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+                log.debug("Enviado MSG_ACK a %s (seq=%d, duplicado)", mac, seq)
+                continue
+            elif seq > exp:
+                log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> ACK eco", mac, seq, exp)
+                link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+                log.debug("Enviado MSG_ACK a %s (seq=%d, fuera de orden)", mac, seq)
+                continue
+
+            remaining = st["size"] - len(st["buf"])
+            if remaining < 0:
+                log.warning("RX MSG_DATA de %s con remaining negativo (remaining=%d) — ignorando exceso", mac, remaining)
+
+            take = payload if len(payload) <= remaining else payload[:max(0, remaining)]
+            if len(payload) > remaining and remaining > 0:
+                log.warning("Truncando payload de %s en seq=%d (payload=%d, remaining=%d)",
+                            mac, seq, len(payload), remaining)
+
+            if take:
+                st["buf"].extend(take)
+                st["crc"] = zlib.crc32(take, st["crc"])
+                log.debug("Acumulado %d/%d bytes de %s (seq=%d, crc=0x%08x)",
+                          len(st["buf"]), st["size"], mac, seq, st["crc"] & 0xffffffff)
+
+            st["expected"] += 1
+            link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
+            log.debug("Enviado MSG_ACK a %s (seq=%d)", mac, seq)
+
+            if seq == 0:
+                log.info("RX primer MSG_DATA de %s (%d/%d bytes)", mac, len(st["buf"]), st["size"])
+            else:
+                log.debug("RX MSG_DATA de %s seq=%d (%d/%d bytes)", mac, seq, len(st["buf"]), st["size"])
+
+        elif mtype == protocol.MSG_DONE:
+            st = _msg_incoming.pop(mac, None)
+            if st:
+                rx_crc = None
+                if len(payload) == 4:
+                    (rx_crc,) = struct.unpack("!I", payload)
+                    log.debug("RX MSG_DONE de %s con crc en payload=0x%08x", mac, rx_crc)
+                expected_crc = rx_crc if rx_crc is not None else st["crc_expected"]
+
+                len_ok = (len(st["buf"]) == st["size"])
+                crc_ok = ((st["crc"] & 0xffffffff) == (expected_crc & 0xffffffff))
+                ok = len_ok and crc_ok
+
+                text = st["buf"].decode("utf-8", errors="replace")
+
+                # Persistimos en un archivo simple de inbox (opcional)
+                os.makedirs(INBOX_DIR, exist_ok=True)
+                msg_path = os.path.join(INBOX_DIR, "messages.log")
+                with open(msg_path, "a", encoding="utf-8") as fp:
+                    fp.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {mac}: {text}\n")
+
+                # Guardar en memoria para el comando "inbox"
+                try:
+                    inbox_add(mac, text)
+                except Exception as e:
+                    log.exception("inbox_add falló: %s", e)
+
+                log.info("RX MSG_DONE de %s -> mensaje (%d/%d bytes, crc_calc=0x%08x esperado=0x%08x) %s "
+                         "[len_ok=%s crc_ok=%s]",
+                         mac, len(st["buf"]), st["size"],
+                         st["crc"] & 0xffffffff, expected_crc & 0xffffffff,
+                         "OK" if ok else "MISMATCH",
+                         "OK" if len_ok else "FAIL", "OK" if crc_ok else "FAIL")
+
+                # Restaurar FILE_* si lo deshabilitamos nosotros
+                if st.get("_owns_msgs_lock") and (allow_files_event is not None) and (not allow_files_event.is_set()):
+                    allow_files_event.set()
+                    log.debug("listen: FILE RX restaurado tras MSG_DONE de %s", mac)
+            else:
+                log.warning("RX MSG_DONE de %s sin estado previo; ignorado", mac)
+
+        elif mtype == protocol.MSG_CANCEL:
+            st = _msg_incoming.pop(mac, None)
+            if st:
+                log.warning("RX MSG_CANCEL de %s -> mensaje descartado (%d bytes, expected=%d)",
+                            mac, len(st["buf"]), st["expected"])
+                # Restaurar FILE_* si lo deshabilitamos nosotros
+                if st.get("_owns_msgs_lock") and (allow_files_event is not None) and (not allow_files_event.is_set()):
+                    allow_files_event.set()
+                    log.debug("listen: FILE RX restaurado tras MSG_CANCEL de %s", mac)
+            else:
+                log.warning("RX MSG_CANCEL de %s sin estado previo; ignorado", mac)
