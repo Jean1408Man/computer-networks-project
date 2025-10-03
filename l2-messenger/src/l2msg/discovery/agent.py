@@ -95,7 +95,7 @@ def listen_forever(
             time.sleep(0.02)
             continue
 
-        pkt = link.recv(timeout=1.0)
+        pkt = link.recv(timeout=0.1)
         if not pkt:
             continue
 
@@ -134,8 +134,33 @@ def listen_forever(
             fname, fsize, crc_expected = protocol.parse_file_offer(payload)
             dst_path = f"{INBOX_DIR}/{fname}"
             log.info("RX FILE_OFFER de %s: %s (%d bytes, crc=0x%08x)", mac, fname, fsize, crc_expected)
+
+            # 1) RESPONDER RÁPIDO: ACCEPT inmediato para no depender de I/O local
+            try:
+                link.send(src, protocol.pack_frame(protocol.FILE_ACCEPT, seq, b""))
+                log.info("TX FILE_ACCEPT a %s (seq=%d) para %s", mac, seq, fname)
+            except Exception as e:
+                log.exception("No se pudo enviar FILE_ACCEPT a %s: %s -> FILE_CANCEL", mac, e)
+                try:
+                    link.send(src, protocol.pack_frame(protocol.FILE_CANCEL, seq, b""))
+                except Exception:
+                    pass
+                continue
+
+            # 2) Preparar estado/archivo; si falla, cancelar enseguida
+            try:
+                os.makedirs(INBOX_DIR, exist_ok=True)
+                fp = open(dst_path, "wb")
+            except Exception as e:
+                log.exception("No se pudo abrir destino %s: %s -> FILE_CANCEL", dst_path, e)
+                try:
+                    link.send(src, protocol.pack_frame(protocol.FILE_CANCEL, seq, b""))
+                except Exception:
+                    pass
+                continue
+
             st = {
-                "fp": open(dst_path, "wb"),
+                "fp": fp,
                 "name": fname,
                 "size": fsize,
                 "bytes": 0,
@@ -152,9 +177,8 @@ def listen_forever(
                 st["_owns_files_lock"] = True
                 log.debug("listen: MSG RX deshabilitado temporalmente (recibiendo FILE de %s)", mac)
 
-            link.send(src, protocol.pack_frame(protocol.FILE_ACCEPT, seq, b""))
-            log.debug("Enviado FILE_ACCEPT a %s", mac)
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
+
 
         elif mtype == protocol.FILE_DATA:
             st = _incoming.get(mac)
@@ -165,12 +189,20 @@ def listen_forever(
 
             exp = st["expected"]
             if seq < exp:
+                # Duplicado (probable reintento por ACK perdido)
                 log.debug("Duplicado de %s seq=%d (expected=%d) -> re-ACK sin escribir", mac, seq, exp)
                 link.send(src, protocol.pack_frame(protocol.FILE_ACK, seq, b""))
                 continue
             elif seq > exp:
-                log.warning("Fuera de orden de %s seq=%d (expected=%d) -> ignorando y re-ACK", mac, seq, exp)
-                link.send(src, protocol.pack_frame(protocol.FILE_ACK, seq, b""))
+                # Fuera de orden en stop-and-wait: NO ACK del futuro; re-ACK del último bueno
+                last_ok = exp - 1
+                if last_ok >= 0:
+                    log.warning("Fuera de orden de %s seq=%d (expected=%d) -> re-ACK last_ok=%d",
+                                mac, seq, exp, last_ok)
+                    link.send(src, protocol.pack_frame(protocol.FILE_ACK, last_ok, b""))
+                else:
+                    log.warning("Fuera de orden de %s seq=%d (expected=%d) -> sin ACK (last_ok<0)",
+                                mac, seq, exp)
                 continue
 
             remaining = st["size"] - st["bytes"]
@@ -230,6 +262,20 @@ def listen_forever(
 
             msize, crc_expected = protocol.parse_msg_offer(payload)
             log.info("RX MSG_OFFER de %s: %d bytes (crc=0x%08x)", mac, msize, crc_expected)
+
+            # 1) RESPONDER RÁPIDO: ACCEPT inmediato
+            try:
+                link.send(src, protocol.pack_frame(protocol.MSG_ACCEPT, seq, b""))
+                log.info("TX MSG_ACCEPT a %s (seq=%d) tamaño=%d", mac, seq, msize)
+            except Exception as e:
+                log.exception("No se pudo enviar MSG_ACCEPT a %s: %s -> MSG_CANCEL", mac, e)
+                try:
+                    link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
+                except Exception:
+                    pass
+                continue
+
+            # 2) Preparar estado del mensaje
             _msg_incoming[mac] = {
                 "buf": bytearray(),
                 "size": msize,
@@ -248,8 +294,6 @@ def listen_forever(
                 _msg_incoming[mac]["_owns_msgs_lock"] = True
                 log.debug("listen: FILE RX deshabilitado temporalmente (recibiendo MSG de %s)", mac)
 
-            link.send(src, protocol.pack_frame(protocol.MSG_ACCEPT, seq, b""))
-            log.debug("Enviado MSG_ACCEPT a %s (seq=%d)", mac, seq)
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
 
         elif mtype == protocol.MSG_DATA:
@@ -267,9 +311,15 @@ def listen_forever(
                 log.debug("Enviado MSG_ACK a %s (seq=%d, duplicado)", mac, seq)
                 continue
             elif seq > exp:
-                log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> ACK eco", mac, seq, exp)
-                link.send(src, protocol.pack_frame(protocol.MSG_ACK, seq, b""))
-                log.debug("Enviado MSG_ACK a %s (seq=%d, fuera de orden)", mac, seq)
+                # Igual que en archivos: no ACK del futuro; re-ACK del último bueno
+                last_ok = exp - 1
+                if last_ok >= 0:
+                    log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> re-ACK last_ok=%d",
+                              mac, seq, exp, last_ok)
+                    link.send(src, protocol.pack_frame(protocol.MSG_ACK, last_ok, b""))
+                else:
+                    log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> sin ACK (last_ok<0)",
+                              mac, seq, exp)
                 continue
 
             remaining = st["size"] - len(st["buf"])
