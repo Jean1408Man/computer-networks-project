@@ -3,6 +3,7 @@ import threading
 import time
 import os
 import logging
+import contextlib
 from l2msg.net.raw_socket import RawLink
 from l2msg.discovery.agent import discover, listen_forever
 from l2msg.utils.config import load_config
@@ -25,8 +26,41 @@ class PeerManager:
     def show_peers(self):
         return self.peer_table.get_peers()
 
+@contextlib.contextmanager
+def pause_listener_for(sending_event, rx_msgs_enable, rx_files_enable, mode: str, settle: float = 0.2, log=None):
+    """
+    Pausa el listener para que el hilo actual pueda usar recv() sin competir.
+    mode: "discover" | "file" | "msg"
+    settle: pequeño retraso para dejar que el listener salga de recv()
+    """
+    if log:
+        log.debug("pause_listener_for(%s): set sending_event", mode)
+    sending_event.set()
 
+    # Configura los flags según el tipo de operación
+    if mode == "msg":
+        rx_msgs_enable.set()
+        rx_files_enable.clear()
+    elif mode == "file":
+        rx_files_enable.set()
+        rx_msgs_enable.clear()
+    else:  # "discover" u otros
+        rx_msgs_enable.set()
+        rx_files_enable.set()
+
+    try:
+        # Pequeño margen para que el listener termine su recv() y vea la pausa
+        time.sleep(settle)
+        yield
+    finally:
+        # Restaurar flags y liberar
+        rx_msgs_enable.set()
+        rx_files_enable.set()
+        sending_event.clear()
+        if log:
+            log.debug("pause_listener_for(%s): cleared sending_event", mode)
 # Hilo de escucha: respeta sending_event para no competir con emisores
+
 # y respeta flags de recepción exclusiva por tipo (mensajes vs archivos)
 def listen_forever_thread(
     link,
@@ -44,8 +78,8 @@ def listen_forever_thread(
             node_name,
             peer_manager.peer_table,
             pause_event=sending_event,
-            allow_msgs_event=rx_msgs_enable,     # <-- NUEVO
-            allow_files_event=rx_files_enable,   # <-- NUEVO
+            allow_msgs_event=rx_msgs_enable,     # habilita/inhabilita recepción de MSG
+            allow_files_event=rx_files_enable,   # habilita/inhabilita recepción de FILE
         )
     except Exception as e:
         log.exception("Excepción en listen_forever: %s", e)
@@ -130,12 +164,9 @@ def main(stdscr):
                 stdscr.getch()
                 continue
 
-            # Pausar el listener para que discover tenga acceso exclusivo a recv()
-            sending_event.set()
-            try:
+            # Pausar el listener con el context manager (incluye settle de ~0.2s)
+            with pause_listener_for(sending_event, rx_msgs_enable, rx_files_enable, mode="discover", log=log):
                 peers = peer_manager.discover_peers(link, node_name)
-            finally:
-                sending_event.clear()
 
             stdscr.clear()
             if not peers:
@@ -150,6 +181,8 @@ def main(stdscr):
                 log.info("Discover: %d peers", len(peers))
             stdscr.refresh()
             stdscr.getch()
+
+
 
         elif key == ord('2'):  # Comando peers
             log.info("Comando: peers")
@@ -170,7 +203,17 @@ def main(stdscr):
 
         elif key == ord('3'):  # Salir
             log.info("Comando: exit")
+            try:
+                # Pausar brevemente el listener durante el cierre
+                with pause_listener_for(sending_event, rx_msgs_enable, rx_files_enable, mode="discover", settle=0.1, log=log):
+                    pass
+            finally:
+                try:
+                    link.close()
+                except Exception:
+                    pass
             break
+
 
         elif key == ord('4'):  # Enviar archivo
             log.info("Comando: sendfile (solicitando datos)")
@@ -199,25 +242,16 @@ def main(stdscr):
                 stdscr.getch()
                 continue
 
-            # Pausar el listener para no competir por recv()
+            # Pausar el listener y enviar (modo FILE)
             log.debug("Pausando listener para enviar archivo...")
-            sending_event.set()
-            # Además, durante el envío de archivo: habilitar FILE y deshabilitar MSG en el listener
-            rx_files_enable.set()
-            rx_msgs_enable.clear()
-            try:
-                log.info("Intentando enviar archivo '%s' a %s", path, mac_str)
-                ok = send_file(link, dst_mac, path)
-                log.info("Resultado envío: %s", "OK" if ok else "FAIL")
-            except Exception as e:
-                log.exception("Excepción durante send_file: %s", e)
-                ok = False
-            finally:
-                # Restaurar flags
-                rx_msgs_enable.set()
-                rx_files_enable.set()
-                sending_event.clear()
-                log.debug("Listener reanudado")
+            with pause_listener_for(sending_event, rx_msgs_enable, rx_files_enable, mode="file", log=log):
+                try:
+                    log.info("Intentando enviar archivo '%s' a %s", path, mac_str)
+                    ok = send_file(link, dst_mac, path)
+                    log.info("Resultado envío: %s", "OK" if ok else "FAIL")
+                except Exception as e:
+                    log.exception("Excepción durante send_file: %s", e)
+                    ok = False
 
             msg = "Archivo enviado correctamente." if ok else "Error al enviar archivo."
             stdscr.addstr(12, 0, msg)
@@ -260,25 +294,17 @@ def main(stdscr):
                     stdscr.getch()
                     continue
 
-                # --- Pausar listener y enviar ---
+                # --- Pausar listener y enviar (modo MSG) ---
                 log.debug("Pausando listener para enviar MSG...")
-                sending_event.set()
-                # Durante el envío de mensaje: habilitar MSG y deshabilitar FILE en el listener
-                rx_msgs_enable.set()
-                rx_files_enable.clear()
-                try:
-                    log.info("Intentando enviar mensaje a %s", mac_pretty)
-                    ok = send_message(link, dst_mac, text)
-                    log.info("Resultado envío MSG a %s: %s", mac_pretty, "OK" if ok else "FAIL")
-                except Exception as e:
-                    log.exception("Excepción durante send_message: %s", e)
-                    ok = False
-                finally:
-                    # Restaurar flags
-                    rx_msgs_enable.set()
-                    rx_files_enable.set()
-                    sending_event.clear()
-                    log.debug("Listener reanudado")
+                with pause_listener_for(sending_event, rx_msgs_enable, rx_files_enable, mode="msg", log=log):
+                    try:
+                        log.info("Intentando enviar mensaje a %s", mac_pretty)
+                        ok = send_message(link, dst_mac, text)
+                        log.info("Resultado envío MSG a %s: %s", mac_pretty, "OK" if ok else "FAIL")
+                    except Exception as e:
+                        log.exception("Excepción durante send_message: %s", e)
+                        ok = False
+
 
                 # --- Feedback al usuario ---
                 msg = "Mensaje enviado correctamente." if ok else "Error al enviar mensaje."
@@ -296,6 +322,7 @@ def main(stdscr):
                 stdscr.addstr(12, 0, "Ocurrió un error. Revise los logs.")
                 stdscr.refresh()
                 stdscr.getch()
+
 
         elif key == ord('6'):  # Ver mensajes recibidos
             log.info("Comando: inbox (listar mensajes)")
