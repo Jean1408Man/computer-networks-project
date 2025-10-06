@@ -24,4 +24,8 @@ def load_config(path: str | None = None) -> dict:
             app["ether_type"] = int(et, 16)
         else:
             app["ether_type"] = int(et)
+
+    app["crypto"] = data.get("crypto", {})
+    app["logging"] = data.get("logging", {})
+
     return app

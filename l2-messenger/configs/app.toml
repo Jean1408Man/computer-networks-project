@@ -20,3 +20,11 @@ console = false
 
 [files]
 inbox_dir = "/tmp/l2files"  # si prefieres config en vez de env L2MSG_INBOX
+
+[crypto]
+enabled = true
+# psk = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+psk = "base64:Q9rkxI9i8u+Yg07gkSV4c2f1Q7XgAEw4mH1/7d9N7KI="
+scrypt_n = 16384
+scrypt_r = 8
+scrypt_p = 1

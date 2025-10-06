@@ -5,6 +5,8 @@ import struct, zlib
 MAGIC = b"L2MG"
 VERSION = 1
 
+FLAG_ENC = 0x01  # payload cifrado/autenticado
+
 # Tipos de mensaje mínimos para descubrimiento
 HELLO     = 0x01
 HELLO_ACK = 0x02
@@ -75,5 +77,15 @@ def parse_msg_offer(p: bytes):
     """
     if len(p) < 12:
         return 0, 0
+    size, h = struct.unpack_from("!QI", p, 0)
+    return size, h
+
+
+def build_msg_offer(size: int, hash32: int = 0) -> bytes:
+    """Payload MSG_OFFER: SIZE(8) | CRC32(4) del mensaje completo en claro"""
+    return struct.pack("!QI", size, hash32 & 0xffffffff)
+
+def parse_msg_offer(p: bytes):
+    """Devuelve: (size:uint64, crc32:uint32)"""
     size, h = struct.unpack_from("!QI", p, 0)
     return size, h

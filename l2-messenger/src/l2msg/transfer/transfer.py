@@ -3,11 +3,21 @@ from l2msg.core import protocol
 from l2msg.net.raw_socket import RawLink
 from l2msg.utils.config import load_config
 from l2msg.utils.ifaces import mac_to_str  # para logs
+from l2msg.crypto.secure import (
+    derive_pairwise_key, encrypt_payload, decrypt_payload,
+    NONCE_LEN, TAG_LEN
+)
 
 RETRY_MAX = 10
 ACK_TIMEOUT = 0.8  # s
 
 log = logging.getLogger("transfer.send")
+
+
+def _pack_sec(key, mtype, seq, payload, flags=0) -> bytes:
+    enc, flags2 = encrypt_payload(key, mtype, seq, flags, payload)
+    return protocol.pack_frame(mtype, seq, enc, flags2)
+
 
 def _crc32_file(path: str) -> int:
     crc = 0
@@ -26,6 +36,12 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
     max_payload = mtu_safe - 14 - protocol.HDR_LEN  # ≈ mtu_safe - 31
     size = os.path.getsize(path)
     name = os.path.basename(path)
+
+
+    key = derive_pairwise_key(cfg, link.src_mac, dst_mac)
+    overhead = (NONCE_LEN + TAG_LEN) if key else 0
+    max_payload = mtu_safe - 14 - protocol.HDR_LEN - overhead
+
 
     # CRC32 del archivo completo (integridad end-to-end)
     crc32_val = _crc32_file(path)
@@ -55,6 +71,9 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
             continue
         try:
             mtype, rseq, flags, payload = protocol.unpack_frame(p)
+            # Autenticar respuesta si va cifrada (payload puede ser vacío)
+            if flags & protocol.FLAG_ENC:
+                _ = decrypt_payload(key, mtype, rseq, flags, payload)
         except Exception as e:
             log.warning("Error desempaquetando trama durante OFFER: %s", e)
             continue
@@ -99,6 +118,11 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
                         continue
                     try:
                         mtype, rseq, _, _ = protocol.unpack_frame(p)
+                        if mtype == protocol.FILE_ACK and rseq == chunk_id:
+                            # autentica ACK si venía cifrado
+                            if flags & protocol.FLAG_ENC:
+                                _ = decrypt_payload(key, mtype, rseq, flags, payload)
+                            got = True
                     except Exception as e:
                         log.warning("Error desempaquetando trama durante DATA: %s", e)
                         continue
@@ -135,6 +159,8 @@ def send_message(link: RawLink, dst_mac: bytes, text: str) -> bool:
     """
     cfg = load_config("configs/app.toml")
     mtu_safe = int(cfg["mtu_safe"])
+    key = derive_pairwise_key(cfg, link.src_mac, dst_mac)
+    overhead = (NONCE_LEN + TAG_LEN) if key else 0
     max_payload = mtu_safe - 14 - protocol.HDR_LEN  # mismo cálculo que archivo
 
     data = text.encode("utf-8")
@@ -164,19 +190,16 @@ def send_message(link: RawLink, dst_mac: bytes, text: str) -> bool:
             continue
         try:
             mtype, rseq, flags, payload = protocol.unpack_frame(p)
-        except Exception as e:
-            log.warning("Error desempaquetando durante MSG_OFFER: %s", e)
+            if flags & protocol.FLAG_ENC:
+                _ = decrypt_payload(key, mtype, rseq, flags, payload)
+            if mtype == protocol.MSG_ACCEPT:
+                accepted = True
+                break
+            if mtype == protocol.MSG_CANCEL:
+                return False
+        except Exception:
             continue
-        if mtype == protocol.MSG_ACCEPT:
-            log.info("Peer %s aceptó el mensaje", mac_to_str(dst_mac))
-            accepted = True
-            break
-        if mtype == protocol.MSG_CANCEL:
-            log.warning("Peer %s canceló durante MSG_OFFER", mac_to_str(dst_mac))
-            return False
-
     if not accepted:
-        log.error("Timeout esperando MSG_ACCEPT de %s", mac_to_str(dst_mac))
         return False
 
     # 2) DATA + ACK (stop-and-wait)
@@ -201,26 +224,23 @@ def send_message(link: RawLink, dst_mac: bytes, text: str) -> bool:
                 if src != dst_mac:
                     continue
                 try:
-                    mtype, rseq, _, _ = protocol.unpack_frame(p)
-                except Exception as e:
-                    log.warning("Error desempaquetando durante MSG_DATA: %s", e)
+                    mtype, rseq, flags, payload = protocol.unpack_frame(p)
+                    if mtype == protocol.MSG_ACK and rseq == chunk_id:
+                        if flags & protocol.FLAG_ENC:
+                            _ = decrypt_payload(key, mtype, rseq, flags, payload)
+                        got = True
+                        break
+                except Exception:
                     continue
-                if mtype == protocol.MSG_ACK and rseq == chunk_id:
-                    got = True
-                    break
-            if got:
-                total_sent += len(chunk)
-                break
+            if got: break
             attempts += 1
-
         if attempts == RETRY_MAX:
-            log.error("Fallo esperando ACK seq=%d -> MSG_CANCEL", chunk_id)
-            link.send(dst_mac, protocol.pack_frame(protocol.MSG_CANCEL, chunk_id, b""))
+            link.send(dst_mac, _pack_sec(key, protocol.MSG_CANCEL, chunk_id, b""))
             return False
-
         off += len(chunk)
         chunk_id += 1
 
+        
     # 3) DONE con CRC32 para validación rápida
     done_payload = struct.pack("!I", crc32_val)
     link.send(dst_mac, protocol.pack_frame(protocol.MSG_DONE, chunk_id, done_payload))
