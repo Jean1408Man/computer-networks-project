@@ -125,3 +125,4 @@ def parse_msg_offer(p: bytes):
     """Devuelve: (size:uint64, crc32:uint32)"""
     size, h = struct.unpack_from("!QI", p, 0)
     return size, h
+

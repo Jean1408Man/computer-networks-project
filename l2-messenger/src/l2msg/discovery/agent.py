@@ -7,6 +7,7 @@ from l2msg.storage.peers import PeerTable
 from l2msg.storage.messages import add as inbox_add  
 from l2msg.crypto.secure import derive_pairwise_key, decrypt_payload, encrypt_payload
 from l2msg.utils.config import load_config
+from l2msg.transfer.transfer import flag_str, _mt
     
 
 log = logging.getLogger("agent.listen")
@@ -69,6 +70,7 @@ def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: flo
 
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
+             
         except Exception as e:
             log.warning("Trama inválida en discover: %s", e)
             continue
@@ -124,6 +126,7 @@ def listen_forever(
 
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
+            log.debug("RX %s %s seq=%d len=%d", flag_str(flags), _mt(mtype), seq, len(payload)) 
         except Exception as e:
             log.warning("Trama inválida en listen_forever: %s", e)
             continue

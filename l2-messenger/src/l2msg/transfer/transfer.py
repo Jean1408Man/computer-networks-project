@@ -7,15 +7,40 @@ from l2msg.crypto.secure import (
     derive_pairwise_key, encrypt_payload, decrypt_payload,
     NONCE_LEN, TAG_LEN
 )
+from l2msg.crypto.secure import NONCE_LEN, TAG_LEN
+
+def _calc_chunk_size(mtu_safe: int, key_present: bool) -> int:
+    """
+    Calcula el tamaño máximo del payload en claro para FILE_DATA,
+    respetando MTU y overhead de cifrado (nonce+tag).
+    """
+    ETH_HDR = 14  # bytes
+    base = mtu_safe - ETH_HDR - protocol.HDR_LEN  # espacio para payload "payload_l2mg"
+    if key_present:
+        base -= (NONCE_LEN + TAG_LEN)  # payload_encriptado = nonce + (plaintext + tag)
+    # límites defensivos:
+    # - no menos de 256B para no enviar demasiados fragmentos
+    # - no más de 1400B para dejar margen a variaciones (opcional)
+    if base < 1:
+        return 256
+    return min(base, 1400)
 
 RETRY_MAX = 10
 ACK_TIMEOUT = 0.8  # s
 
 log = logging.getLogger("transfer.send")
 
+def flag_str(flags: int) -> str:
+    try:
+        return "ENC" if (flags & protocol.FLAG_ENC) else "PLAIN"
+    except Exception:
+        return f"flags=0x{flags:02x}"
 
-def _pack_sec(key, mtype, seq, payload, flags=0) -> bytes:
+
+def _pack_sec(key, mtype, seq, payload, flags=0):
     enc, flags2 = encrypt_payload(key, mtype, seq, flags, payload)
+    # Log de transmisión
+    log.debug("TX %s %s seq=%d len=%d", flag_str(flags2), _mt(mtype), seq, len(enc))
     return protocol.pack_frame(mtype, seq, enc, flags2)
 
 
@@ -33,22 +58,23 @@ def _crc32_file(path: str) -> int:
 def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
     cfg = load_config("configs/app.toml")
     mtu_safe = int(cfg["mtu_safe"])
-    max_payload = mtu_safe - 14 - protocol.HDR_LEN  # ≈ mtu_safe - 31
     size = os.path.getsize(path)
     name = os.path.basename(path)
-
 
     key = derive_pairwise_key(cfg, link.src_mac, dst_mac)
     overhead = (NONCE_LEN + TAG_LEN) if key else 0
     max_payload = mtu_safe - 14 - protocol.HDR_LEN - overhead
+    if max_payload <= 0:
+        max_payload = 256  # fallback defensivo para no romper lecturas
 
+    log.debug(
+        "MTU_SAFE=%d HDR_LEN=%d overhead=%d max_payload=%d",
+        mtu_safe, protocol.HDR_LEN, overhead, max_payload
+    )
 
-    # CRC32 del archivo completo (integridad end-to-end)
     crc32_val = _crc32_file(path)
-
     log.info("Preparando envío de archivo: %s (%d bytes, crc=0x%08x) a %s",
              name, size, crc32_val, mac_to_str(dst_mac))
-    log.debug("mtu_safe=%d, max_payload=%d", mtu_safe, max_payload)
 
     # 1) OFFER / ACCEPT
     offer = protocol.build_file_offer(name, size, crc32_val)
@@ -90,82 +116,74 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
         log.error("Timeout esperando FILE_ACCEPT de %s", mac_to_str(dst_mac))
         return False
 
-    # 2) DATA + ACK (stop-and-wait)
+    # 2) DATA + ACK (reemplaza tu bloque actual por este)
     with open(path, "rb") as f:
         chunk_id = 0
         total_sent = 0
+
         while True:
-            data = f.read(max_payload)  # usa todo el espacio útil
+            data = f.read(max_payload)
             if not data:
-                break
-            frame = protocol.pack_frame(protocol.FILE_DATA, chunk_id, data)
-            attempts = 0
-            while attempts < RETRY_MAX:
-                log.debug("Enviando FILE_DATA seq=%d len=%d (intento %d)",
-                          chunk_id, len(data), attempts + 1)
+                break  # no queda más por enviar
+
+            frame = _pack_sec(key, protocol.FILE_DATA, chunk_id, data)
+
+            acked = False
+            for attempt in range(RETRY_MAX):
                 link.send(dst_mac, frame)
-                # esperar ACK(chunk_id)
-                t_ack = time.monotonic()
-                got = False
-                while time.monotonic() - t_ack < ACK_TIMEOUT:
+                deadline = time.monotonic() + ACK_TIMEOUT
+
+                while time.monotonic() < deadline:
                     pkt = link.recv(timeout=0.2)
                     if not pkt:
                         continue
 
                     src, _, p = pkt
                     if src != dst_mac:
-                        log.debug("Ignorando trama de %s (esperando ACK seq=%d de %s)",
-                                mac_to_str(src), chunk_id, mac_to_str(dst_mac))
-                        continue
+                        continue  # de otro peer
 
-                    # Intentar desempaquetar SIEMPRE; si no es L2MG válido, ignorar y seguir esperando
                     try:
                         mtype, rseq, flags_rx, payload_rx = protocol.unpack_frame(p)
                     except Exception as e:
-                        # Puede ser padding, otra app usando el mismo EtherType, etc.
+                        # basura/padding u otro tipo -> ignorar y seguir esperando
                         log.debug("RX inválido durante DATA: %s | len=%d | head=%s",
                                 (str(e) or e.__class__.__name__), len(p), p[:8].hex(" "))
                         continue
 
-                    log.debug("Recibido %s seq=%d de %s", _mt(mtype), rseq, mac_to_str(src))
+                    # ¿Es el ACK del chunk esperado?
+                    if mtype == protocol.FILE_ACK and rseq == chunk_id:
+                        if flags_rx & getattr(protocol, "FLAG_ENC", 0):
+                            try:
+                                _ = decrypt_payload(key, mtype, rseq, flags_rx, payload_rx)
+                                log.debug("Decrypt OK ACK seq=%d", rseq)
+                            except Exception as e:
+                                log.debug("Decrypt FAIL ACK seq=%d: %s", rseq, (str(e) or e.__class__.__name__))
+                                continue  # no contamos este ACK
+                        acked = True
+                        break  # sal del while de espera
 
-                    # ¿Es el ACK del chunk que esperamos?
-                    if not (mtype == protocol.FILE_ACK and rseq == chunk_id):
-                        # Otros frames (ACK de otro seq, DATA, etc.) => ignorar y seguir esperando
-                        continue
-
-                    # Si viene marcado como cifrado, AUTENTICAR el ACK con su propio flags/payload
-                    if flags_rx & getattr(protocol, "FLAG_ENC", 0):
-                        try:
-                            _ = decrypt_payload(key, mtype, rseq, flags_rx, payload_rx)
-                            log.debug("Decrypt OK ACK seq=%d", rseq)
-                        except Exception as e:
-                            # Clave/AAD incorrectos => no cuentes este ACK
-                            log.debug("Decrypt FAIL ACK seq=%d: %s", rseq, (str(e) or e.__class__.__name__))
-                            continue
-
-                    got = True
-                    break
-
-                if got:
+                if acked:
                     total_sent += len(data)
-                    log.debug("ACK seq=%d confirmado", chunk_id)
-                    break
-                attempts += 1
+                    log.debug("ACK seq=%d confirmado (attempt=%d)", chunk_id, attempt + 1)
+                    break  # sal del for de reintentos, pasa al siguiente chunk
+                else:
+                    log.debug("Timeout esperando ACK seq=%d (reintento %d/%d)",
+                            chunk_id, attempt + 1, RETRY_MAX)
 
-                if attempts == RETRY_MAX:
-                    log.error("Fallo permanente esperando ACK seq=%d -> CANCEL", chunk_id)
-                    link.send(dst_mac, protocol.pack_frame(protocol.FILE_CANCEL, chunk_id, b""))
-                    return False
+            else:
+                # se agotaron los RETRY_MAX sin ACK
+                log.error("Fallo permanente esperando ACK seq=%d -> CANCEL", chunk_id)
+                link.send(dst_mac, protocol.pack_frame(protocol.FILE_CANCEL, chunk_id, b""))
+                return False
 
-                chunk_id += 1
+            # Solo se llega aquí si 'acked' fue True
+            chunk_id += 1
 
-
-    # 3) DONE (incluye CRC32 en el payload para verificación rápida)
+    # 3) DONE (igual que ya tienes)
     done_payload = struct.pack("!I", crc32_val)
-    link.send(dst_mac, protocol.pack_frame(protocol.FILE_DONE, chunk_id, done_payload))
+    link.send(dst_mac, _pack_sec(key, protocol.FILE_DONE, chunk_id, done_payload))
     log.info("Envío completo, total=%d bytes en %d chunks -> %s",
-             total_sent, chunk_id, mac_to_str(dst_mac))
+            total_sent, chunk_id, mac_to_str(dst_mac))
     return True
 
 
