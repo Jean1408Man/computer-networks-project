@@ -144,10 +144,10 @@ def main(stdscr):
         stdscr.addstr(0, 0, "Comandos:")
         stdscr.addstr(1, 0, "1. Descubrir Peers (discover)")
         stdscr.addstr(2, 0, "2. Mostrar Peers (peers)")
-        stdscr.addstr(3, 0, "3. Salir (exit)")
+        stdscr.addstr(3, 0, "3. Enviar mensaje (sendmsg)")
         stdscr.addstr(4, 0, "4. Enviar archivo (sendfile)")
-        stdscr.addstr(5, 0, "5. Enviar mensaje (sendmsg)")
-        stdscr.addstr(6, 0, "6. Ver mensajes recibidos (inbox)")
+        stdscr.addstr(5, 0, "5. Ver mensajes recibidos (inbox)")
+        stdscr.addstr(6, 0, "6. Salir (exit)")
         stdscr.addstr(7, 0, "Seleccione un comando (1-6):")
         stdscr.refresh()
 
@@ -201,7 +201,7 @@ def main(stdscr):
             stdscr.refresh()
             stdscr.getch()
 
-        elif key == ord('3'):  # Salir
+        elif key == ord('6'):  # Salir
             log.info("Comando: exit")
             try:
                 # Pausar brevemente el listener durante el cierre
@@ -258,7 +258,7 @@ def main(stdscr):
             stdscr.refresh()
             stdscr.getch()
 
-        elif key == ord('5'):  # Enviar mensaje
+        elif key == ord('3'):  # Enviar mensaje
             log.info("Comando: sendmsg (solicitando datos)")
             stdscr.clear()
 
@@ -324,7 +324,7 @@ def main(stdscr):
                 stdscr.getch()
 
 
-        elif key == ord('6'):  # Ver mensajes recibidos
+        elif key == ord('5'):  # Ver mensajes recibidos
             log.info("Comando: inbox (listar mensajes)")
             stdscr.clear()
             stdscr.addstr(0, 0, "📨 Mensajes recibidos (más recientes al final):")
