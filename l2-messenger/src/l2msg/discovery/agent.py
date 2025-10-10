@@ -14,8 +14,17 @@ _incoming = {}
 _msg_incoming = {}
 INBOX_DIR = os.getenv("L2MSG_INBOX", "/tmp/l2files")
 
+MIN_PTXT_ACK = 16  # 16B de plaintext para ACK/ACCEPT/DONE vacíos
+
 def _pack_sec(key, mtype, seq, payload, flags=0):
-    """Empaqueta un frame L2MG, cifrando el payload si hay clave."""
+    # Si vamos a cifrar y el payload es muy chico (ACK/ACCEPT vacíos),
+    # rellenamos a 16 bytes antes de cifrar para que (header+nonce+ct+tag) > 46B
+    if key and len(payload) < MIN_PTXT_ACK and mtype in (
+        protocol.FILE_ACCEPT, protocol.FILE_ACK, protocol.FILE_DONE,
+        protocol.MSG_ACCEPT,  protocol.MSG_ACK,  protocol.MSG_DONE
+    ):
+        payload = payload + b"\x00" * (MIN_PTXT_ACK - len(payload))
+
     enc_payload, flags2 = encrypt_payload(key, mtype, seq, flags, payload)
     return protocol.pack_frame(mtype, seq, enc_payload, flags2)
 

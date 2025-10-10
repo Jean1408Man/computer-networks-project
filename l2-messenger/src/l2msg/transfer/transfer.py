@@ -111,35 +111,55 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
                     pkt = link.recv(timeout=0.2)
                     if not pkt:
                         continue
+
                     src, _, p = pkt
                     if src != dst_mac:
                         log.debug("Ignorando trama de %s (esperando ACK seq=%d de %s)",
-                                  mac_to_str(src), chunk_id, mac_to_str(dst_mac))
+                                mac_to_str(src), chunk_id, mac_to_str(dst_mac))
                         continue
+
+                    # Intentar desempaquetar SIEMPRE; si no es L2MG válido, ignorar y seguir esperando
                     try:
-                        mtype, rseq, _, _ = protocol.unpack_frame(p)
-                        if mtype == protocol.FILE_ACK and rseq == chunk_id:
-                            # autentica ACK si venía cifrado
-                            if flags & protocol.FLAG_ENC:
-                                _ = decrypt_payload(key, mtype, rseq, flags, payload)
-                            got = True
+                        mtype, rseq, flags_rx, payload_rx = protocol.unpack_frame(p)
                     except Exception as e:
-                        log.warning("Error desempaquetando trama durante DATA: %s", e)
+                        # Puede ser padding, otra app usando el mismo EtherType, etc.
+                        log.debug("RX inválido durante DATA: %s | len=%d | head=%s",
+                                (str(e) or e.__class__.__name__), len(p), p[:8].hex(" "))
                         continue
+
                     log.debug("Recibido %s seq=%d de %s", _mt(mtype), rseq, mac_to_str(src))
-                    if mtype == protocol.FILE_ACK and rseq == chunk_id:
-                        got = True
-                        break
+
+                    # ¿Es el ACK del chunk que esperamos?
+                    if not (mtype == protocol.FILE_ACK and rseq == chunk_id):
+                        # Otros frames (ACK de otro seq, DATA, etc.) => ignorar y seguir esperando
+                        continue
+
+                    # Si viene marcado como cifrado, AUTENTICAR el ACK con su propio flags/payload
+                    if flags_rx & getattr(protocol, "FLAG_ENC", 0):
+                        try:
+                            _ = decrypt_payload(key, mtype, rseq, flags_rx, payload_rx)
+                            log.debug("Decrypt OK ACK seq=%d", rseq)
+                        except Exception as e:
+                            # Clave/AAD incorrectos => no cuentes este ACK
+                            log.debug("Decrypt FAIL ACK seq=%d: %s", rseq, (str(e) or e.__class__.__name__))
+                            continue
+
+                    got = True
+                    break
+
                 if got:
                     total_sent += len(data)
                     log.debug("ACK seq=%d confirmado", chunk_id)
                     break
                 attempts += 1
-            if attempts == RETRY_MAX:
-                log.error("Fallo permanente esperando ACK seq=%d -> CANCEL", chunk_id)
-                link.send(dst_mac, protocol.pack_frame(protocol.FILE_CANCEL, chunk_id, b""))
-                return False
-            chunk_id += 1
+
+                if attempts == RETRY_MAX:
+                    log.error("Fallo permanente esperando ACK seq=%d -> CANCEL", chunk_id)
+                    link.send(dst_mac, protocol.pack_frame(protocol.FILE_CANCEL, chunk_id, b""))
+                    return False
+
+                chunk_id += 1
+
 
     # 3) DONE (incluye CRC32 en el payload para verificación rápida)
     done_payload = struct.pack("!I", crc32_val)

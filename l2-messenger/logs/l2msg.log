@@ -1,0 +1,42 @@
+2025-10-09 23:38:32 INFO [MainThread] root: Logging inicializado (level=INFO, file=logs/l2msg.log, console=False)
+2025-10-09 23:38:32 INFO [MainThread] ui: UI iniciada
+2025-10-09 23:38:32 INFO [MainThread] ui: Config: iface=eth0 ether_type=0x88b5 node_name=nodo-demo
+2025-10-09 23:38:32 ERROR [MainThread] ui: No se pudo crear RawLink: [Errno 1] Operation not permitted
+Traceback (most recent call last):
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/cli/__main__.py", line 108, in main
+    link = RawLink(iface=iface, ether_type=etype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/net/raw_socket.py", line 14, in __init__
+    self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ether_type))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 233, in __init__
+    _socket.socket.__init__(self, family, type, proto, fileno)
+PermissionError: [Errno 1] Operation not permitted
+2025-10-09 23:39:45 INFO [MainThread] root: Logging inicializado (level=INFO, file=logs/l2msg.log, console=False)
+2025-10-09 23:39:45 INFO [MainThread] ui: UI iniciada
+2025-10-09 23:39:45 INFO [MainThread] ui: Config: iface=eth0 ether_type=0x88b5 node_name=nodo-demo
+2025-10-09 23:39:45 ERROR [MainThread] ui: No se pudo crear RawLink: [Errno 1] Operation not permitted
+Traceback (most recent call last):
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/cli/__main__.py", line 108, in main
+    link = RawLink(iface=iface, ether_type=etype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/net/raw_socket.py", line 14, in __init__
+    self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ether_type))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 233, in __init__
+    _socket.socket.__init__(self, family, type, proto, fileno)
+PermissionError: [Errno 1] Operation not permitted
+2025-10-09 23:40:08 INFO [MainThread] root: Logging inicializado (level=INFO, file=logs/l2msg.log, console=False)
+2025-10-09 23:40:08 INFO [MainThread] ui: UI iniciada
+2025-10-09 23:40:08 INFO [MainThread] ui: Config: iface=eth0 ether_type=0x88b5 node_name=nodo-demo
+2025-10-09 23:40:08 ERROR [MainThread] ui: No se pudo crear RawLink: [Errno 1] Operation not permitted
+Traceback (most recent call last):
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/cli/__main__.py", line 108, in main
+    link = RawLink(iface=iface, ether_type=etype)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Pro/computer-networks-project/l2-messenger/src/l2msg/net/raw_socket.py", line 14, in __init__
+    self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ether_type))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 233, in __init__
+    _socket.socket.__init__(self, family, type, proto, fileno)
+PermissionError: [Errno 1] Operation not permitted

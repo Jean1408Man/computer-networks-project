@@ -26,24 +26,60 @@ MSG_CANCEL = 0x25
 # MAGIC(4) | VER(1) | TYPE(1) | SEQ(4) | LEN(2) | FLAGS(1) | CRC32(4)
 _HDR = struct.Struct("!4s B B I H B I")
 HDR_LEN = _HDR.size  # 17 bytes
+_MIN_ETH_PAYLOAD = 46  # mínimo de bytes de "payload Ethernet" (sin contar cabecera Ethernet)
 
 def pack_frame(msg_type: int, seq: int, payload: bytes, flags: int = 0) -> bytes:
-    # CRC sobre el payload únicamente (simple para el arranque)
+    """
+    Empaqueta frame L2MG. El CRC se calcula SOLO sobre 'payload'.
+    (Opcional) Si el total (cabecera+payload) < 46 bytes, pad hasta 46 para
+    evitar rarezas con NICs cuando el payload es muy pequeño (ACK/ACCEPT cifrados).
+    """
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise TypeError("payload debe ser bytes-like")
+
+    plen = len(payload)
+    if plen > 0xFFFF:
+        raise ValueError(f"LEN demasiado grande para campo de 16 bits: {plen}")
+
     crc = zlib.crc32(payload) & 0xffffffff
-    return _HDR.pack(MAGIC, VERSION, msg_type, seq, len(payload), flags, crc) + payload
+    header = _HDR.pack(MAGIC, VERSION, msg_type, seq, plen, flags, crc)
+    frame = header + payload
+
+    # --- OPCIONAL: padding a mínimo Ethernet payload ---
+    # Ethernet exige mínimo 46B de payload L2. Si nuestra (cabecera+payload)
+    # es menor, añadimos ceros. El receptor los ignorará porque corta por 'LEN'.
+    if len(frame) < _MIN_ETH_PAYLOAD:
+        frame += b"\x00" * (_MIN_ETH_PAYLOAD - len(frame))
+
+    return frame
+
 
 def unpack_frame(data: bytes):
-    if len(data) < HDR_LEN:
-        raise ValueError("frame demasiado corto")
-    magic, ver, mtype, seq, plen, flags, crc = _HDR.unpack_from(data, 0)
-    if magic != MAGIC or ver != VERSION:
-        raise ValueError("MAGIC/VER inválidos")
-    payload = data[HDR_LEN:HDR_LEN+plen]
-    if len(payload) != plen:
-        raise ValueError("LEN no coincide con datos")
-    if (zlib.crc32(payload) & 0xffffffff) != crc:
-        raise ValueError("CRC inválido")
-    return mtype, seq, flags, payload
+    total = len(data)
+    if total < HDR_LEN:
+        raise ValueError(f"frame demasiado corto: total={total} < HDR_LEN={HDR_LEN}")
+
+    magic, ver, mtype, seq, plen, flags, crc_hdr = _HDR.unpack_from(data, 0)
+    if magic != MAGIC:
+        raise ValueError(f"MAGIC inválido: {magic!r} != {MAGIC!r}")
+    if ver != VERSION:
+        raise ValueError(f"VERSIÓN inválida: {ver} (esperado {VERSION})")
+    if plen < 0 or plen > 0xFFFF:
+        raise ValueError(f"LEN inválido/sospechoso: {plen}")
+
+    start = HDR_LEN
+    end   = start + plen
+    if total < end:
+        raise ValueError(f"LEN no coincide: declarada={plen}, disponible={total - HDR_LEN}")
+
+    payload = memoryview(data)[start:end]  # ignorar padding más allá de LEN
+    crc_calc = zlib.crc32(payload) & 0xffffffff
+    if crc_calc != (crc_hdr & 0xffffffff):
+        raise ValueError(f"CRC inválido (calc=0x{crc_calc:08x} hdr=0x{crc_hdr:08x}, plen={plen}, total={total})")
+
+    return mtype, seq, flags, payload.tobytes()
+
+
 
 def build_file_offer(name: str, size: int, hash32: int = 0) -> bytes:
     """
