@@ -46,13 +46,13 @@ def parse_payload_name(payload: bytes) -> str:
 def broadcast_hello(link: RawLink, node_name: str, seq: int = 1):
     payload = build_payload_name(node_name)
     frame = protocol.pack_frame(protocol.HELLO, seq, payload)
-    log.debug("Broadcast HELLO seq=%d name=%s", seq, node_name)
+    log.info("Broadcast HELLO seq=%d name=%s", seq, node_name)
     link.send(b"\xff\xff\xff\xff\xff\xff", frame)
 
 def send_ack(link: RawLink, dst_mac: bytes, node_name: str, seq: int = 1):
     payload = build_payload_name(node_name)
     frame = protocol.pack_frame(protocol.HELLO_ACK, seq, payload)
-    log.debug("Enviando HELLO_ACK -> %s", mac_to_str(dst_mac))
+    log.info("Enviando HELLO_ACK -> %s", mac_to_str(dst_mac))
     link.send(dst_mac, frame)
 
 def discover(link: RawLink, node_name: str, peer_table: PeerTable, window_s: float = 1.5) -> dict[str, str]:
@@ -126,7 +126,7 @@ def listen_forever(
 
         try:
             mtype, seq, flags, payload = protocol.unpack_frame(p)
-            log.debug("RX %s %s seq=%d len=%d", flag_str(flags), _mt(mtype), seq, len(payload)) 
+            log.info("RX %s %s seq=%d len=%d", flag_str(flags), _mt(mtype), seq, len(payload)) 
         except Exception as e:
             log.warning("Trama inválida en listen_forever: %s", e)
             continue
@@ -210,7 +210,7 @@ def listen_forever(
             if (allow_msgs_event is not None) and allow_msgs_event.is_set():
                 allow_msgs_event.clear()
                 st["_owns_files_lock"] = True
-                log.debug("listen: MSG RX deshabilitado temporalmente (recibiendo FILE de %s)", mac)
+                log.info("listen: MSG RX deshabilitado temporalmente (recibiendo FILE de %s)", mac)
 
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
 
@@ -236,7 +236,7 @@ def listen_forever(
             exp = st["expected"]
             if seq < exp:
                 # Duplicado (probable reintento por ACK perdido)
-                log.debug("Duplicado de %s seq=%d (expected=%d) -> re-ACK sin escribir", mac, seq, exp)
+                log.info("Duplicado de %s seq=%d (expected=%d) -> re-ACK sin escribir", mac, seq, exp)
                 link.send(src, _pack_sec(key, protocol.FILE_ACK, seq, b""))
                 continue
             elif seq > exp:
@@ -262,10 +262,10 @@ def listen_forever(
             if seq == 0:
                 log.info("RX primer FILE_DATA de %s (bytes=%d/%d)", mac, st["bytes"], st["size"])
             else:
-                log.debug("RX FILE_DATA de %s seq=%d (%d/%d bytes)", mac, seq, st["bytes"], st["size"])
+                log.info("RX FILE_DATA de %s seq=%d (%d/%d bytes)", mac, seq, st["bytes"], st["size"])
 
             link.send(src, _pack_sec(key, protocol.FILE_ACK, seq, b""))
-            log.debug("ACK seq=%d enviado a %s", seq, mac)
+            log.info("ACK seq=%d enviado a %s", seq, mac)
 
         elif mtype == protocol.FILE_DONE:
             st = _incoming.pop(mac, None)
@@ -295,7 +295,7 @@ def listen_forever(
                 # Restaurar MSG_* si lo deshabilitamos nosotros
                 if st.get("_owns_files_lock") and (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
                     allow_msgs_event.set()
-                    log.debug("listen: MSG RX restaurado tras FILE_DONE de %s", mac)
+                    log.info("listen: MSG RX restaurado tras FILE_DONE de %s", mac)
 
         elif mtype == protocol.FILE_CANCEL:
             st = _incoming.pop(mac, None)
@@ -308,9 +308,9 @@ def listen_forever(
                             mac, st["name"], st["bytes"])
                 if st.get("_owns_files_lock") and (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
                     allow_msgs_event.set()
-                    log.debug("listen: MSG RX restaurado tras FILE_CANCEL de %s", mac)
+                    log.info("listen: MSG RX restaurado tras FILE_CANCEL de %s", mac)
 
-        # ------------------ CONTROL DE MENSAJES -------------------
+                # ------------------ CONTROL DE MENSAJES -------------------
         elif mtype == protocol.MSG_OFFER:
             # Si mensajes están deshabilitados, cancela inmediatamente
             if (allow_msgs_event is not None) and (not allow_msgs_event.is_set()):
@@ -318,11 +318,16 @@ def listen_forever(
                 link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
                 continue
 
+            # RX: ENC/PLAIN
+            encstr = "ENC" if (flags & getattr(protocol, "FLAG_ENC", 0)) else "PLAIN"
+            log.info("RX %s MSG_OFFER seq=%d len=%d de %s", encstr, seq, len(payload), mac)
+
             key = derive_pairwise_key(load_config("configs/app.toml"), link.src_mac, src)
 
             try:
                 if flags & getattr(protocol, "FLAG_ENC", 0):
                     payload = decrypt_payload(key, mtype, seq, flags, payload)
+                    log.info("Decrypt OK: MSG_OFFER seq=%d", seq)
                 msize, crc_expected = protocol.parse_msg_offer(payload)
             except Exception as e:
                 log.warning("No se pudo procesar MSG_OFFER de %s: %s -> MSG_CANCEL", mac, e)
@@ -333,6 +338,7 @@ def listen_forever(
 
             # 1) ACCEPT (cifrado si hay clave)
             try:
+                log.info("TX %s MSG_ACCEPT seq=%d a %s", "ENC" if key else "PLAIN", seq, mac)
                 link.send(src, _pack_sec(key, protocol.MSG_ACCEPT, seq, b""))
                 log.info("TX MSG_ACCEPT a %s (seq=%d) tamaño=%d", mac, seq, msize)
             except Exception as e:
@@ -351,9 +357,9 @@ def listen_forever(
                 "crc": 0,
                 "crc_expected": crc_expected,
                 "_owns_msgs_lock": False,   # deshabilitamos FILE mientras recibimos MSG
-                "key": key,                 # NUEVO: guardamos clave de la sesión
+                "key": key,                 # guardamos clave de la sesión
             }
-            log.debug("Estado inicial mensaje [%s]: size=%d expected=%d crc=0x%08x",
+            log.info("Estado inicial mensaje [%s]: size=%d expected=%d crc=0x%08x",
                     mac, _msg_incoming[mac]["size"], _msg_incoming[mac]["expected"],
                     _msg_incoming[mac]["crc"])
 
@@ -361,7 +367,7 @@ def listen_forever(
             if (allow_files_event is not None) and allow_files_event.is_set():
                 allow_files_event.clear()
                 _msg_incoming[mac]["_owns_msgs_lock"] = True
-                log.debug("listen: FILE RX deshabilitado temporalmente (recibiendo MSG de %s)", mac)
+                log.info("listen: FILE RX deshabilitado temporalmente (recibiendo MSG de %s)", mac)
 
             peer_table.add_peer(mac, peer_table.get_peers().get(mac, {}).get("name", ""))
 
@@ -370,14 +376,19 @@ def listen_forever(
             if not st:
                 log.warning("RX MSG_DATA inesperado de %s seq=%d -> MSG_CANCEL", mac, seq)
                 link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
-                log.debug("Enviado MSG_CANCEL a %s (no había estado de mensaje)", mac)
+                log.info("Enviado MSG_CANCEL a %s (no había estado de mensaje)", mac)
                 continue
 
             key = st.get("key")
 
+            # RX: ENC/PLAIN
+            encstr = "ENC" if (flags & getattr(protocol, "FLAG_ENC", 0)) else "PLAIN"
+            log.info("RX %s MSG_DATA seq=%d len=%d de %s", encstr, seq, len(payload), mac)
+
             try:
                 if flags & getattr(protocol, "FLAG_ENC", 0):
                     payload = decrypt_payload(key, mtype, seq, flags, payload)
+                    log.info("Decrypt OK: MSG_DATA seq=%d", seq)
             except Exception as e:
                 log.warning("No se pudo descifrar MSG_DATA de %s seq=%d: %s -> MSG_CANCEL", mac, seq, e)
                 link.send(src, protocol.pack_frame(protocol.MSG_CANCEL, seq, b""))
@@ -385,19 +396,21 @@ def listen_forever(
 
             exp = st["expected"]
             if seq < exp:
-                log.debug("RX MSG_DATA duplicado de %s (seq=%d < expected=%d) -> ACK eco", mac, seq, exp)
+                log.info("RX MSG_DATA duplicado de %s (seq=%d < expected=%d) -> ACK eco", mac, seq, exp)
+                log.info("TX %s MSG_ACK seq=%d a %s", "ENC" if key else "PLAIN", seq, mac)
                 link.send(src, _pack_sec(key, protocol.MSG_ACK, seq, b""))
-                log.debug("Enviado MSG_ACK a %s (seq=%d, duplicado)", mac, seq)
+                log.info("Enviado MSG_ACK a %s (seq=%d, duplicado)", mac, seq)
                 continue
             elif seq > exp:
                 # Igual que en archivos: no ACK del futuro; re-ACK del último bueno
                 last_ok = exp - 1
                 if last_ok >= 0:
-                    log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> re-ACK last_ok=%d",
+                    log.info("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> re-ACK last_ok=%d",
                             mac, seq, exp, last_ok)
+                    log.info("TX %s MSG_ACK seq=%d a %s", "ENC" if key else "PLAIN", last_ok, mac)
                     link.send(src, _pack_sec(key, protocol.MSG_ACK, last_ok, b""))
                 else:
-                    log.debug("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> sin ACK (last_ok<0)",
+                    log.info("RX MSG_DATA fuera de orden de %s (seq=%d > expected=%d) -> sin ACK (last_ok<0)",
                             mac, seq, exp)
                 continue
 
@@ -413,32 +426,38 @@ def listen_forever(
             if take:
                 st["buf"].extend(take)
                 st["crc"] = zlib.crc32(take, st["crc"])
-                log.debug("Acumulado %d/%d bytes de %s (seq=%d, crc=0x%08x)",
+                log.info("Acumulado %d/%d bytes de %s (seq=%d, crc=0x%08x)",
                         len(st["buf"]), st["size"], mac, seq, st["crc"] & 0xffffffff)
 
             st["expected"] += 1
+            log.info("TX %s MSG_ACK seq=%d a %s", "ENC" if key else "PLAIN", seq, mac)
             link.send(src, _pack_sec(key, protocol.MSG_ACK, seq, b""))
-            log.debug("Enviado MSG_ACK a %s (seq=%d)", mac, seq)
+            log.info("Enviado MSG_ACK a %s (seq=%d)", mac, seq)
 
             if seq == 0:
                 log.info("RX primer MSG_DATA de %s (%d/%d bytes)", mac, len(st["buf"]), st["size"])
             else:
-                log.debug("RX MSG_DATA de %s seq=%d (%d/%d bytes)", mac, seq, len(st["buf"]), st["size"])
+                log.info("RX MSG_DATA de %s seq=%d (%d/%d bytes)", mac, seq, len(st["buf"]), st["size"])
 
         elif mtype == protocol.MSG_DONE:
             st = _msg_incoming.pop(mac, None)
             key = st.get("key") if st else None
             if st:
+                # RX: ENC/PLAIN
+                encstr = "ENC" if (flags & getattr(protocol, "FLAG_ENC", 0)) else "PLAIN"
+                log.info("RX %s MSG_DONE seq=%d len=%d de %s", encstr, seq, len(payload), mac)
+
                 try:
                     if flags & getattr(protocol, "FLAG_ENC", 0):
                         payload = decrypt_payload(key, mtype, seq, flags, payload)
+                        log.info("Decrypt OK: MSG_DONE seq=%d", seq)
                 except Exception as e:
                     log.warning("No se pudo descifrar MSG_DONE de %s: %s", mac, e)
 
                 rx_crc = None
                 if len(payload) == 4:
                     (rx_crc,) = struct.unpack("!I", payload)
-                    log.debug("RX MSG_DONE de %s con crc en payload=0x%08x", mac, rx_crc)
+                    log.info("RX MSG_DONE de %s con crc en payload=0x%08x", mac, rx_crc)
                 expected_crc = rx_crc if rx_crc is not None else st["crc_expected"]
 
                 len_ok = (len(st["buf"]) == st["size"])
@@ -469,7 +488,7 @@ def listen_forever(
                 # Restaurar FILE_* si lo deshabilitamos nosotros
                 if st.get("_owns_msgs_lock") and (allow_files_event is not None) and (not allow_files_event.is_set()):
                     allow_files_event.set()
-                    log.debug("listen: FILE RX restaurado tras MSG_DONE de %s", mac)
+                    log.info("listen: FILE RX restaurado tras MSG_DONE de %s", mac)
         else:
             # (sin cambios) MSG_CANCEL
             if mtype == protocol.MSG_CANCEL:
@@ -479,6 +498,6 @@ def listen_forever(
                                 mac, len(st["buf"]), st["expected"])
                     if st.get("_owns_msgs_lock") and (allow_files_event is not None) and (not allow_files_event.is_set()):
                         allow_files_event.set()
-                        log.debug("listen: FILE RX restaurado tras MSG_CANCEL de %s", mac)
+                        log.info("listen: FILE RX restaurado tras MSG_CANCEL de %s", mac)
                 else:
                     log.warning("RX MSG_CANCEL de %s sin estado previo; ignorado", mac)
