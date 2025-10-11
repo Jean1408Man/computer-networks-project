@@ -47,7 +47,7 @@ docker compose -f docker/virtual-lab/compose.yml up -d --build
 ### Entrar en los contenedores
 
 ```
-docker exec -it virtual-lab-node1-1 /bin/bash
+docker exec -it virtual-lab-node1-1 /bin/bash # virtual-lab-node1-1 es el nombre por defecto
 ```
 ### Ejecutar comandos
 ```
@@ -71,5 +71,16 @@ getcap /usr/bin/python3.12
 export PYTHONPATH="$PWD/src"
 python3 -m l2msg.cli.__main__
 ```
-
+### ver logs y errores en ejecucion
+```
 tail -f logs/l2msg.log
+```
+
+### Si lo probamos fuera del virtual lab, debemos modificar las configuraciones en configs/app.toml
+```
+[app]
+iface = "wlo1"
+ether_type = "0x88B5"
+node_name = "pc-a"
+mtu_safe = 1400
+```
