@@ -1,4 +1,3 @@
-# protocol.py — stub (definir MAGIC, VERSION, tipos de mensaje, headers, CRC, etc.)
 from __future__ import annotations
 import struct, zlib
 

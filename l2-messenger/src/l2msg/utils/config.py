@@ -11,9 +11,7 @@ DEFAULTS = {
 def load_config(path: str | None = None) -> dict:
     # Busca configs/app.toml por defecto
     base = pathlib.Path(os.environ.get("L2MSG_CONFIG", path or "configs/app.toml"))
-    if not base.exists():
-        # fallback a example
-        base = pathlib.Path("configs/app.example.toml")
+    
     with base.open("rb") as f:
         data = tomllib.load(f)
     app = {**DEFAULTS, **(data.get("app") or {})}

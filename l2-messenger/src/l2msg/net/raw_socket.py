@@ -1,6 +1,5 @@
-# raw_socket.py — AF_PACKET, bind a interfaz, selección por EtherType, etc.
 from __future__ import annotations
-import socket, struct, select, time
+import socket, struct, select
 import threading
 from l2msg.utils.ifaces import get_mac_address
 

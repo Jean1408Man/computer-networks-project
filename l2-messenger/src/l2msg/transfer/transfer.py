@@ -9,22 +9,6 @@ from l2msg.crypto.secure import (
 )
 from l2msg.crypto.secure import NONCE_LEN, TAG_LEN
 
-def _calc_chunk_size(mtu_safe: int, key_present: bool) -> int:
-    """
-    Calcula el tamaño máximo del payload en claro para FILE_DATA,
-    respetando MTU y overhead de cifrado (nonce+tag).
-    """
-    ETH_HDR = 14  # bytes
-    base = mtu_safe - ETH_HDR - protocol.HDR_LEN  # espacio para payload "payload_l2mg"
-    if key_present:
-        base -= (NONCE_LEN + TAG_LEN)  # payload_encriptado = nonce + (plaintext + tag)
-    # límites defensivos:
-    # - no menos de 256B para no enviar demasiados fragmentos
-    # - no más de 1400B para dejar margen a variaciones (opcional)
-    if base < 1:
-        return 256
-    return min(base, 1400)
-
 RETRY_MAX = 10
 ACK_TIMEOUT = 0.8  # s
 
@@ -115,7 +99,6 @@ def send_file(link: RawLink, dst_mac: bytes, path: str) -> bool:
         log.error("Timeout esperando FILE_ACCEPT de %s", mac_to_str(dst_mac))
         return False
 
-    # 2) DATA + ACK (reemplaza tu bloque actual por este)
     with open(path, "rb") as f:
         chunk_id = 0
         total_sent = 0

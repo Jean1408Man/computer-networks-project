@@ -490,7 +490,7 @@ def listen_forever(
                     allow_files_event.set()
                     log.info("listen: FILE RX restaurado tras MSG_DONE de %s", mac)
         else:
-            # (sin cambios) MSG_CANCEL
+            # MSG_CANCEL
             if mtype == protocol.MSG_CANCEL:
                 st = _msg_incoming.pop(mac, None)
                 if st:
