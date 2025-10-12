@@ -38,8 +38,12 @@ mtu_safe = 1400          # Tamaño seguro de la MTU
 ```
 docker compose -f docker/virtual-lab/compose.yml down
 docker compose -f docker/virtual-lab/compose.yml up -d --build
-```
 
+```
+### Levantar contenedores sin reconstruir
+```
+    docker compose -f docker/virtual-lab/compose.yml up -d --no-build
+```
 ### Ver los contenedores y buscar su nombre o su id
 ```
     docker ps
@@ -64,8 +68,13 @@ sudo setcap cap_net_raw+ep /usr/bin/python3.12
 
 # 2) Verifica
 getcap /usr/bin/python3.12
+
 ```
 
+## Instalar cryptografy, si no lo tienes
+```
+pip install cryptography
+```
 ### Corremos esto
 ```
 export PYTHONPATH="$PWD/src"
